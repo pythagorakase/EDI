@@ -2,76 +2,65 @@
 """
 EDI Communication CLI
 
-Sends messages to the EDI agent (Clawdbot) via HTTP API.
+Sends messages to the EDI agent (Clawdbot) via the Thread Server HTTP API.
 EDI is an autonomous agent that can help with testing and other tasks.
 
 Usage:
     edi "Hello, EDI!"
     edi "Please run the live tests for the wizard agent"
     echo "message" | edi
+
+Thread Management:
+    edi "message"                    # Auto-continue last thread (or start new)
+    edi --new "message"              # Force new thread
+    edi --thread abc123 "message"    # Continue specific thread
+    edi --show-thread "message"      # Display thread ID with response
 """
 
 import argparse
-import json
 import sys
+from pathlib import Path
+from typing import Optional, Tuple
 
 import requests
 
-EDI_ENDPOINT = "https://claude-base.tail342046.ts.net/tools/invoke"
-EDI_TOKEN = "h2WzPZjazQG8CQYrS8RgXI5MMVWFh6SI"
-SESSION_KEY = "main"
+EDI_ENDPOINT = "http://100.104.206.23:19001/ask"
+THREAD_FILE = Path.home() / ".edi-thread"
 
 
-def send_to_edi(message: str) -> str:
-    """Send a message to EDI and return the response."""
-    headers = {
-        "Authorization": f"Bearer {EDI_TOKEN}",
-        "Content-Type": "application/json",
-    }
+def save_thread(thread_id: str) -> None:
+    """Save thread ID for auto-continuation."""
+    THREAD_FILE.write_text(thread_id)
 
+
+def load_thread() -> Optional[str]:
+    """Load saved thread ID, if any."""
+    if THREAD_FILE.exists():
+        return THREAD_FILE.read_text().strip() or None
+    return None
+
+
+def clear_thread() -> None:
+    """Clear saved thread ID."""
+    THREAD_FILE.unlink(missing_ok=True)
+
+
+def send_to_edi(message: str, thread_id: Optional[str] = None) -> Tuple[str, Optional[str]]:
+    """Send a message to EDI and return (reply, thread_id)."""
     payload = {
-        "tool": "sessions_send",
-        "args": {
-            "sessionKey": SESSION_KEY,
-            "message": message,
-            "timeoutSeconds": 120,
-        }
+        "message": message,
+        "threadId": thread_id,
+        "timeoutSeconds": 120,
     }
 
-    try:
-        response = requests.post(EDI_ENDPOINT, headers=headers, json=payload, timeout=120)
-        response.raise_for_status()
+    response = requests.post(EDI_ENDPOINT, json=payload, timeout=130)
+    response.raise_for_status()
+    data = response.json()
 
-        data = response.json()
-
-        # Extract the reply from EDI's response structure
-        # Response has: {"ok": true, "result": {"details": {"reply": "..."}}}
-        if isinstance(data, dict):
-            # Unwrap result wrapper if present
-            if "result" in data and isinstance(data["result"], dict):
-                data = data["result"]
-
-            # Primary path: details.reply contains the actual message
-            if "details" in data and "reply" in data["details"]:
-                return data["details"]["reply"]
-            # Fallback: parse content[0].text as JSON and get reply
-            if "content" in data and isinstance(data["content"], list):
-                for item in data["content"]:
-                    if item.get("type") == "text":
-                        try:
-                            inner = json.loads(item["text"])
-                            if "reply" in inner:
-                                return inner["reply"]
-                        except json.JSONDecodeError:
-                            return item["text"]
-            # Last resort: return formatted JSON
-            return json.dumps(data, indent=2)
-        return str(data)
-
-    except requests.exceptions.RequestException as e:
-        return f"Error communicating with EDI: {e}"
-    except json.JSONDecodeError as e:
-        return f"Error parsing EDI response: {e}"
+    if data.get("ok"):
+        return data["reply"], data.get("threadId")
+    else:
+        raise RuntimeError(data.get("error", "Unknown error from EDI"))
 
 
 def main():
@@ -86,9 +75,19 @@ def main():
         help="Message to send to EDI (can also be piped via stdin)",
     )
     parser.add_argument(
-        "--raw",
+        "--thread", "-t",
+        metavar="ID",
+        help="Continue existing thread by ID",
+    )
+    parser.add_argument(
+        "--new", "-n",
         action="store_true",
-        help="Output raw JSON response without parsing",
+        help="Force new thread (clears saved thread)",
+    )
+    parser.add_argument(
+        "--show-thread",
+        action="store_true",
+        help="Display thread ID with response",
     )
 
     args = parser.parse_args()
@@ -106,9 +105,39 @@ def main():
         print("Error: Empty message")
         sys.exit(1)
 
+    # Determine thread ID to use
+    if args.new:
+        clear_thread()
+        thread_id = None
+    elif args.thread:
+        thread_id = args.thread
+    else:
+        # Auto-continue: use saved thread if available
+        thread_id = load_thread()
+
     # Send to EDI
-    response = send_to_edi(message)
-    print(response)
+    try:
+        reply, new_thread_id = send_to_edi(message, thread_id)
+
+        # Save thread for auto-continuation
+        if new_thread_id:
+            save_thread(new_thread_id)
+
+        # Output
+        if args.show_thread and new_thread_id:
+            print(f"[Thread: {new_thread_id}]")
+        print(reply)
+
+    except requests.exceptions.ConnectionError:
+        print("Error: Cannot reach EDI Thread Server.", file=sys.stderr)
+        print("Is Tailscale running? Check the menu bar icon or run: open /Applications/Tailscale.app", file=sys.stderr)
+        sys.exit(1)
+    except requests.exceptions.RequestException as e:
+        print(f"Error communicating with EDI: {e}", file=sys.stderr)
+        sys.exit(1)
+    except RuntimeError as e:
+        print(f"EDI error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
