@@ -67,8 +67,13 @@ def load_auth_secret() -> Optional[bytes]:
     return None
 
 
+def canonicalize_auth_payload(payload: Dict[str, Any]) -> str:
+    """Create a canonical JSON string for HMAC signing."""
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+
 def verify_hmac_signature(
-    message: str,
+    payload: Dict[str, Any],
     timestamp: str,
     signature: str,
     secret: bytes
@@ -88,7 +93,7 @@ def verify_hmac_signature(
         return False, "Timestamp expired (replay protection)"
 
     # Recompute and compare signature
-    signature_payload = f"{timestamp}:{message}"
+    signature_payload = f"{timestamp}:{canonicalize_auth_payload(payload)}"
     expected = hmac.new(secret, signature_payload.encode(), hashlib.sha256).hexdigest()
 
     if not hmac.compare_digest(signature, expected):
@@ -269,7 +274,7 @@ class EDIHandler(BaseHTTPRequestHandler):
                 self._send_json(401, {"ok": False, "error": "Missing authentication headers"})
                 return
 
-            is_valid, error = verify_hmac_signature(message, timestamp, signature, auth_secret)
+            is_valid, error = verify_hmac_signature(body, timestamp, signature, auth_secret)
             if not is_valid:
                 self.log_message(f"Auth failed: {error}")
                 self._send_json(401, {"ok": False, "error": f"Authentication failed: {error}"})
