@@ -18,7 +18,10 @@ Thread Management:
 """
 
 import argparse
+import hashlib
+import hmac
 import sys
+import time
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -26,6 +29,7 @@ import requests
 
 EDI_ENDPOINT = "http://100.104.206.23:19001/ask"
 THREAD_FILE = Path.home() / ".edi-thread"
+SECRET_FILE = Path.home() / ".config" / "edi" / "secret"
 
 
 def save_thread(thread_id: str) -> None:
@@ -45,6 +49,29 @@ def clear_thread() -> None:
     THREAD_FILE.unlink(missing_ok=True)
 
 
+def load_secret() -> Optional[bytes]:
+    """Load the shared secret for HMAC signing."""
+    if SECRET_FILE.exists():
+        try:
+            secret = SECRET_FILE.read_text().strip()
+            if secret:
+                return secret.encode()
+        except Exception:
+            pass
+    return None
+
+
+def sign_request(message: str, secret: bytes) -> Tuple[str, str]:
+    """Generate HMAC signature for a message.
+
+    Returns (timestamp, signature) tuple.
+    """
+    timestamp = str(int(time.time()))
+    signature_payload = f"{timestamp}:{message}"
+    signature = hmac.new(secret, signature_payload.encode(), hashlib.sha256).hexdigest()
+    return timestamp, signature
+
+
 def send_to_edi(message: str, thread_id: Optional[str] = None) -> Tuple[str, Optional[str]]:
     """Send a message to EDI and return (reply, thread_id)."""
     payload = {
@@ -53,7 +80,16 @@ def send_to_edi(message: str, thread_id: Optional[str] = None) -> Tuple[str, Opt
         "timeoutSeconds": 120,
     }
 
-    response = requests.post(EDI_ENDPOINT, json=payload, timeout=130)
+    headers = {"Content-Type": "application/json"}
+
+    # Add HMAC authentication if secret is available
+    secret = load_secret()
+    if secret:
+        timestamp, signature = sign_request(message, secret)
+        headers["X-EDI-Timestamp"] = timestamp
+        headers["X-EDI-Signature"] = signature
+
+    response = requests.post(EDI_ENDPOINT, json=payload, headers=headers, timeout=130)
     response.raise_for_status()
     data = response.json()
 

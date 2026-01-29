@@ -6,15 +6,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVER_SCRIPT="$SCRIPT_DIR/edi-thread-server.py"
 PID_FILE="/tmp/edi-server.pid"
 LOG_FILE="/tmp/edi-server.log"
+ENV_FILE="/etc/edi/env"
 
 start() {
     if [ -f "$PID_FILE" ] && kill -0 "$(cat $PID_FILE)" 2>/dev/null; then
         echo "EDI server already running (PID: $(cat $PID_FILE))"
         return 1
     fi
-    
+
+    # Load environment (includes EDI_AUTH_SECRET)
+    if [ -f "$ENV_FILE" ]; then
+        echo "Loading environment from $ENV_FILE"
+        source "$ENV_FILE"
+    fi
+
     echo "Starting EDI Thread Server..."
-    nohup python3 "$SERVER_SCRIPT" > "$LOG_FILE" 2>&1 &
+    nohup env EDI_AUTH_SECRET="${EDI_AUTH_SECRET:-}" python3 "$SERVER_SCRIPT" > "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
     sleep 2
     

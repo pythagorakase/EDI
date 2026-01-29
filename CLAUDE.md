@@ -89,3 +89,47 @@ echo "message" | edi
 - Request format: `{"message": "...", "threadId": null | "existing-id"}`
 - Response format: `{"ok": true, "reply": "...", "threadId": "..."}`
 - Error responses include `"ok": false` with error details
+
+## Authentication
+
+EDI-Link uses HMAC-SHA256 to verify that messages originate from trusted sources.
+
+### How It Works
+
+1. Client signs each request with a shared secret
+2. Server verifies the signature before processing
+3. Timestamps prevent replay attacks (5-minute window)
+
+### Request Headers
+
+```
+X-EDI-Timestamp: <unix_timestamp>
+X-EDI-Signature: <hex_hmac_sha256>
+```
+
+Signature is computed as: `HMAC-SHA256(secret, "{timestamp}:{message}")`
+
+### Setup
+
+**Generate shared secret:**
+```bash
+mkdir -p ~/.config/edi
+openssl rand -hex 32 > ~/.config/edi/secret
+chmod 600 ~/.config/edi/secret
+```
+
+**Deploy to server (choose one):**
+```bash
+# Option 1: Environment variable (preferred)
+export EDI_AUTH_SECRET="<paste-secret-here>"
+
+# Option 2: File
+echo "<paste-secret-here>" > /etc/edi/secret
+chmod 600 /etc/edi/secret
+```
+
+### Graceful Degradation
+
+- **No secret configured on server:** Requests allowed (backward compatible)
+- **Secret configured:** Authentication enforced, unsigned requests rejected
+- **Mismatched secrets:** Server returns 401 Unauthorized

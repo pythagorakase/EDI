@@ -18,12 +18,16 @@ Endpoints:
     Returns: {"ok": true, "server": "edi-thread-server", "version": "3"}
 """
 
+import hashlib
+import hmac
 import json
+import os
 import uuid
 import time
 import urllib.request
 import urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
 from typing import Optional, Dict, Any
 
 # Configuration
@@ -34,6 +38,63 @@ LISTEN_PORT = 19001
 LISTEN_HOST = "0.0.0.0"  # Accessible via Tailscale
 DEFAULT_TIMEOUT = 120
 POLL_INTERVAL = 1.0  # seconds between polls
+
+# HMAC Authentication
+AUTH_SECRET_ENV = "EDI_AUTH_SECRET"
+AUTH_SECRET_FILE = Path("/etc/edi/secret")
+AUTH_TIMESTAMP_TOLERANCE = 300  # 5 minutes in seconds
+
+
+def load_auth_secret() -> Optional[bytes]:
+    """Load shared secret for HMAC verification.
+
+    Priority: environment variable > file > None (auth disabled)
+    """
+    # Try environment variable first
+    secret = os.environ.get(AUTH_SECRET_ENV)
+    if secret:
+        return secret.strip().encode()
+
+    # Try file fallback
+    if AUTH_SECRET_FILE.exists():
+        try:
+            secret = AUTH_SECRET_FILE.read_text().strip()
+            if secret:
+                return secret.encode()
+        except Exception:
+            pass
+
+    return None
+
+
+def verify_hmac_signature(
+    message: str,
+    timestamp: str,
+    signature: str,
+    secret: bytes
+) -> tuple[bool, str]:
+    """Verify HMAC signature.
+
+    Returns (is_valid, error_message).
+    """
+    # Check timestamp freshness (replay protection)
+    try:
+        ts = int(timestamp)
+    except ValueError:
+        return False, "Invalid timestamp format"
+
+    now = int(time.time())
+    if abs(now - ts) > AUTH_TIMESTAMP_TOLERANCE:
+        return False, "Timestamp expired (replay protection)"
+
+    # Recompute and compare signature
+    signature_payload = f"{timestamp}:{message}"
+    expected = hmac.new(secret, signature_payload.encode(), hashlib.sha256).hexdigest()
+
+    if not hmac.compare_digest(signature, expected):
+        return False, "Invalid signature"
+
+    return True, ""
 
 
 def make_request(path: str, payload: Optional[dict], token: str, method: str = "POST") -> dict:
@@ -184,7 +245,7 @@ class EDIHandler(BaseHTTPRequestHandler):
         if self.path != "/ask":
             self.send_error(404)
             return
-        
+
         # Parse request body
         try:
             length = int(self.headers.get('Content-Length', 0))
@@ -192,11 +253,27 @@ class EDIHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._send_json(400, {"ok": False, "error": "Invalid JSON"})
             return
-        
+
         message = body.get("message")
         if not message:
             self._send_json(400, {"ok": False, "error": "message required"})
             return
+
+        # HMAC Authentication
+        auth_secret = load_auth_secret()
+        if auth_secret:
+            timestamp = self.headers.get("X-EDI-Timestamp")
+            signature = self.headers.get("X-EDI-Signature")
+
+            if not timestamp or not signature:
+                self._send_json(401, {"ok": False, "error": "Missing authentication headers"})
+                return
+
+            is_valid, error = verify_hmac_signature(message, timestamp, signature, auth_secret)
+            if not is_valid:
+                self.log_message(f"Auth failed: {error}")
+                self._send_json(401, {"ok": False, "error": f"Authentication failed: {error}"})
+                return
         
         timeout_seconds = body.get("timeoutSeconds", DEFAULT_TIMEOUT)
         
@@ -299,6 +376,17 @@ def main():
     print('  {"message": "...", "threadId": "abc123"} # Continue thread')
     print()
     print("Server-generated threadId returned in response.")
+    print()
+
+    # Authentication status
+    auth_secret = load_auth_secret()
+    if auth_secret:
+        print("Authentication: ENABLED (HMAC-SHA256)")
+        print(f"  Timestamp tolerance: {AUTH_TIMESTAMP_TOLERANCE}s")
+    else:
+        print("Authentication: DISABLED (no secret configured)")
+        print(f"  Set {AUTH_SECRET_ENV} env var or create {AUTH_SECRET_FILE}")
+
     print("=" * 60)
     print()
     
