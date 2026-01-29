@@ -1,6 +1,9 @@
-# EDI - Agent-to-Agent Communication
+# EDI-Link - Agent-to-Agent Communication
 
-EDI (Electronic Data Interchange) is a communication system for agent-to-agent messaging with Clawdbot, enabling Claude Code to collaborate with an autonomous agent for testing and other tasks.
+**EDI-Link** is the communication system for messaging with **EDI**, a Clawdbot instance that serves as an autonomous agent for testing and other tasks.
+
+- **EDI** = the Clawdbot agent instance running on the remote server
+- **EDI-Link** = this communication layer (client + server)
 
 ## Structure
 
@@ -8,7 +11,7 @@ EDI (Electronic Data Interchange) is a communication system for agent-to-agent m
 EDI/
 ├── packages/
 │   ├── client/      # CLI tool for sending messages to EDI
-│   └── server/      # Thread server with polling (runs on Clawdbot host)
+│   └── server/      # EDI-Link thread server (runs on EDI's host)
 └── README.md
 ```
 
@@ -41,24 +44,24 @@ See [packages/server/README.md](packages/server/README.md) for details.
 ```
 ┌─────────────────────┐                    ┌─────────────────────────────────┐
 │  packages/client/   │   HTTP POST /ask   │  packages/server/               │
-│  edi CLI            │ ─────────────────▶ │  EDI Thread Server (:19001)     │
+│  edi CLI            │ ─────────────────▶ │  EDI-Link Thread Server (:19001)│
 │  (local machine)    │                    │                                 │
-│                     │ ◀───────────────── │  Polls Clawdbot for response    │
+│                     │ ◀───────────────── │  Polls EDI for response         │
 │                     │  {reply, threadId} │                                 │
 └─────────────────────┘                    └───────────────┬─────────────────┘
                                                            │
                                                            ▼
                                            ┌─────────────────────────────────┐
-                                           │  Clawdbot Gateway (:18789)      │
+                                           │  EDI (Clawdbot on :18789)       │
                                            │  /hooks/agent → sessions        │
                                            └─────────────────────────────────┘
 ```
 
 ## Key Features
 
-- **Server-generated thread IDs** — Proper API design where server owns session identity
-- **Conversation continuity** — Thread IDs allow multi-turn conversations
-- **Synchronous interface** — Polls async Clawdbot into blocking request-response
+- **Server-generated thread IDs** — Proper API design where EDI-Link server owns session identity
+- **Conversation continuity** — Thread IDs allow multi-turn conversations with EDI
+- **Synchronous interface** — Polls EDI's async model into blocking request-response
 - **Tailscale access** — Secure remote access without public exposure
 
 ## Protocol

@@ -1,14 +1,14 @@
-# EDI Thread Server
+# EDI-Link Thread Server
 
-Server-side component for EDI agent-to-agent communication. Runs on the Clawdbot host (`claude-base.tail342046.ts.net`).
+Server-side component of EDI-Link. Runs on EDI's host (`claude-base.tail342046.ts.net`).
 
 ## Overview
 
-The EDI Thread Server provides a **synchronous HTTP interface** for Claude Code to communicate with EDI (the Clawdbot agent). It handles:
+The EDI-Link Thread Server provides a **synchronous HTTP interface** for Claude Code to communicate with **EDI** (the Clawdbot agent). It handles:
 
-- **Server-side thread ID generation** — Proper API design where the server owns identity
-- **Session creation and continuity** — Via Clawdbot's `/hooks/agent` endpoint
-- **Response polling** — Converts Clawdbot's async model to sync request-response
+- **Server-side thread ID generation** — Proper API design where EDI-Link owns identity
+- **Session creation and continuity** — Via EDI's `/hooks/agent` endpoint
+- **Response polling** — Converts EDI's async model to sync request-response
 
 ## Files
 
@@ -22,10 +22,10 @@ server/
 ## Architecture
 
 ```
-┌─────────────┐     ┌───────────────────┐     ┌──────────────┐
-│ Claude Code │────▶│ EDI Thread Server │────▶│   Clawdbot   │
-│  (MacBook)  │     │  (port 19001)     │     │   Gateway    │
-└─────────────┘     └───────────────────┘     └──────────────┘
+┌─────────────┐     ┌───────────────────────┐     ┌──────────────┐
+│ Claude Code │────▶│ EDI-Link Thread Server│────▶│     EDI      │
+│  (MacBook)  │     │  (port 19001)         │     │  (Clawdbot)  │
+└─────────────┘     └───────────────────────┘     └──────────────┘
        │                     │                       │
        │  POST /ask          │                       │
        │  {"message": ".."}  │                       │
@@ -64,7 +64,7 @@ Send a message to EDI and receive a response.
 {
   "ok": true,
   "reply": "EDI's response text",
-  "threadId": "a1b2c3d4"      // Server-generated, use to continue thread
+  "threadId": "a1b2c3d4"      // EDI-Link generated, use to continue thread
 }
 ```
 
@@ -93,23 +93,23 @@ Health check endpoint.
 ## Thread Lifecycle
 
 1. **New Thread**: Client sends `{"message": "...", "threadId": null}`
-   - Server generates unique 8-character thread ID
-   - Creates new Clawdbot session `edi:<threadId>`
+   - EDI-Link generates unique 8-character thread ID
+   - Creates new EDI session `edi:<threadId>`
    - Returns thread ID in response
 
 2. **Continue Thread**: Client sends `{"message": "...", "threadId": "<id>"}`
-   - Server uses existing session with conversation history
+   - EDI-Link uses existing session with conversation history
    - EDI remembers prior context from this thread
 
-3. **Thread Persistence**: Threads are Clawdbot sessions — they persist across server restarts
+3. **Thread Persistence**: Threads are EDI sessions — they persist across server restarts
 
 ## Deployment
 
 ### Prerequisites
 
 - Python 3.8+
-- Clawdbot gateway running on port 18789
-- Webhooks enabled in Clawdbot config:
+- EDI (Clawdbot) running on port 18789
+- Webhooks enabled in EDI's config:
   ```json
   {
     "hooks": {
@@ -153,7 +153,7 @@ python3 edi-thread-server.py
 Edit `edi-thread-server.py` to change:
 
 ```python
-CLAWDBOT_URL = "http://127.0.0.1:18789"   # Gateway URL
+CLAWDBOT_URL = "http://127.0.0.1:18789"   # EDI (Clawdbot) URL
 GATEWAY_TOKEN = "..."                       # For /tools/invoke
 HOOKS_TOKEN = "edi-hook-secret-2026"        # For /hooks/agent
 LISTEN_PORT = 19001                         # Server port
@@ -169,33 +169,33 @@ The server binds to `0.0.0.0` so it's accessible via:
 - **Local**: `http://127.0.0.1:19001`
 - **Tailscale**: `http://100.104.206.23:19001`
 
-Tailscale provides secure access from Neil's MacBook without exposing the server to the public internet.
+Tailscale provides secure access without exposing the server to the public internet.
 
 ## How It Works
 
 1. **Request arrives** at `/ask` with message and optional threadId
-2. **Thread ID generation**: If threadId is null, server generates one (8-char UUID prefix)
-3. **Session key**: Mapped to `edi:<threadId>` for Clawdbot
+2. **Thread ID generation**: If threadId is null, EDI-Link generates one (8-char UUID prefix)
+3. **Session key**: Mapped to `edi:<threadId>` for EDI
 4. **Agent trigger**: POST to `/hooks/agent` starts an isolated agent turn
-5. **Polling**: Server polls `sessions_history` every second until response appears
+5. **Polling**: EDI-Link polls `sessions_history` every second until response appears
 6. **Response**: Returns EDI's reply along with the thread ID
 
-This converts Clawdbot's async agent model into a synchronous request-response API suitable for CLI usage.
+This converts EDI's async agent model into a synchronous request-response API suitable for CLI usage.
 
 ## Troubleshooting
 
 ### Server won't start
 - Check if port 19001 is already in use: `ss -tlnp | grep 19001`
-- Check Clawdbot gateway is running: `curl http://127.0.0.1:18789/`
+- Check EDI is running: `curl http://127.0.0.1:18789/`
 
 ### "Failed to trigger agent" error
-- Verify hooks are enabled in Clawdbot config
+- Verify hooks are enabled in EDI's config
 - Check hooks token matches: `hooks.token` in config
 
 ### Timeout waiting for response
 - Increase `timeoutSeconds` in request
-- Check Clawdbot logs for errors
-- Verify gateway is responsive
+- Check EDI logs for errors
+- Verify EDI is responsive
 
 ### Connection refused from MacBook
 - Ensure server is running: `./start-edi-server.sh status`

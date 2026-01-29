@@ -1,6 +1,6 @@
-# EDI CLI Messenger
+# EDI-Link CLI
 
-EDI (Electronic Data Interchange) is a CLI tool for agent-to-agent communication with Clawdbot, an autonomous agent that can help with testing and other tasks.
+The EDI-Link CLI (`edi`) is a command-line tool for communicating with **EDI**, a Clawdbot instance that serves as an autonomous agent for testing and other tasks.
 
 ## Branch
 
@@ -25,16 +25,16 @@ edi --raw "message"
 ## Architecture
 
 ```
-scripts/edi (Python CLI)
+edi CLI (Python)
     │
     ▼
-HTTPS POST to EDI_ENDPOINT
+HTTP POST to EDI-Link Thread Server
     │
     ▼
-Clawdbot (autonomous agent on claude-base.tail342046.ts.net)
+EDI (Clawdbot instance on claude-base)
     │
     ▼
-Response: {"ok": true, "result": {"details": {"reply": "..."}}}
+Response: {"ok": true, "reply": "...", "threadId": "..."}
 ```
 
 ## Configuration
@@ -67,7 +67,7 @@ edi "What time is it?"
 
 ## Related
 
-This tool enables:
+EDI-Link enables:
 - Automated test runs via agent delegation
 - Agent-to-agent task coordination
-- Remote command execution through Clawdbot
+- Remote command execution through EDI
