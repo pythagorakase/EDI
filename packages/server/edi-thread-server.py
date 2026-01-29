@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-EDI Thread Server v3 - Proper server-side threading with /hooks/agent + polling.
+EDI Thread Server v3 - Server-side threading with session continuity.
 
 Flow:
 1. Client sends message (optionally with threadId)
 2. Server generates threadId if not provided
-3. Server calls /hooks/agent to create/continue session
-4. Server polls sessions_history until response appears
+3. For NEW threads: /hooks/agent creates session, then poll for response
+4. For CONTINUED threads: sessions_send appends to existing session (preserves history)
 5. Server returns response with threadId
 
 Endpoints:
@@ -80,7 +80,7 @@ def get_session_history(session_key: str) -> dict:
     """Get session history via /tools/invoke."""
     # The gateway prepends 'agent:main:' to hook session keys
     full_key = f"agent:main:{session_key}"
-    
+
     return make_request("/tools/invoke", {
         "tool": "sessions_history",
         "args": {
@@ -89,6 +89,36 @@ def get_session_history(session_key: str) -> dict:
             "includeTools": False
         }
     }, GATEWAY_TOKEN)
+
+
+def continue_thread(session_key: str, message: str, timeout_seconds: int) -> dict:
+    """Continue an existing thread via sessions_send.
+
+    Unlike trigger_agent_hook which creates a fresh session, sessions_send
+    appends to an existing session's conversation history.
+    """
+    full_key = f"agent:main:{session_key}"
+    return make_request("/tools/invoke", {
+        "tool": "sessions_send",
+        "args": {
+            "sessionKey": full_key,
+            "message": message,
+            "timeoutSeconds": timeout_seconds
+        }
+    }, GATEWAY_TOKEN)
+
+
+def extract_reply_from_send_result(result: dict) -> Optional[str]:
+    """Extract reply from sessions_send result.
+
+    sessions_send returns the assistant's reply directly in the result,
+    unlike hooks/agent which requires polling.
+    """
+    if not result.get("ok"):
+        return None
+
+    details = result.get("result", {}).get("details", {})
+    return details.get("reply")
 
 
 def extract_last_assistant_reply(history_result: dict) -> Optional[str]:
@@ -180,39 +210,48 @@ class EDIHandler(BaseHTTPRequestHandler):
         session_key = f"edi:{thread_id}"
         
         self.log_message(f"{'New' if is_new_thread else 'Continue'} thread={thread_id}")
-        
-        # Prepare the message with context for new threads
+
         if is_new_thread:
+            # New thread: use /hooks/agent to create session
             full_message = f"""[EDI CLI Request - Thread: {thread_id}]
 
 You are EDI, responding to Claude Code (a coding assistant helping Neil with NEXUS).
 This is a NEW thread. Keep responses focused and technical.
 
 Request: {message}"""
+
+            hook_result = trigger_agent_hook(session_key, full_message, timeout_seconds)
+
+            if not hook_result.get("ok"):
+                self._send_json(500, {
+                    "ok": False,
+                    "error": f"Failed to trigger agent: {hook_result.get('error')}",
+                    "threadId": thread_id
+                })
+                return
+
+            run_id = hook_result.get("runId")
+            self.log_message(f"Agent triggered, runId={run_id}")
+
+            # Poll for response (hooks/agent is async, need to wait)
+            reply = poll_for_response(session_key, timeout_seconds)
         else:
-            full_message = f"""[EDI CLI Request - Thread: {thread_id}]
+            # Continue thread: use sessions_send for history preservation
+            self.log_message(f"Continuing thread={thread_id} via sessions_send")
 
-Continuing thread {thread_id}.
+            result = continue_thread(session_key, message, timeout_seconds)
 
-Request: {message}"""
-        
-        # Trigger the agent
-        hook_result = trigger_agent_hook(session_key, full_message, timeout_seconds)
-        
-        if not hook_result.get("ok"):
-            self._send_json(500, {
-                "ok": False,
-                "error": f"Failed to trigger agent: {hook_result.get('error')}",
-                "threadId": thread_id
-            })
-            return
-        
-        run_id = hook_result.get("runId")
-        self.log_message(f"Agent triggered, runId={run_id}")
-        
-        # Poll for response
-        reply = poll_for_response(session_key, timeout_seconds)
-        
+            if not result.get("ok"):
+                self._send_json(500, {
+                    "ok": False,
+                    "error": f"Failed to continue thread: {result.get('error')}",
+                    "threadId": thread_id
+                })
+                return
+
+            # Extract reply from sessions_send response (synchronous, no polling needed)
+            reply = extract_reply_from_send_result(result)
+
         if reply:
             self._send_json(200, {
                 "ok": True,
