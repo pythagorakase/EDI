@@ -1,73 +1,47 @@
-# EDI CLI Messenger
+# EDI - Agent-to-Agent Communication
 
-EDI (Electronic Data Interchange) is a CLI tool for agent-to-agent communication with Clawdbot, an autonomous agent that can help with testing and other tasks.
+EDI (Electronic Data Interchange) is a communication system for agent-to-agent messaging with Clawdbot, an autonomous agent that can help with testing and other tasks.
 
-## Branch
+## Structure
 
-**Work branch**: `edi-comms-setup` (based on main, contains only EDI-specific work)
+```
+EDI/
+├── packages/
+│   ├── client/      # CLI tool for sending messages to EDI
+│   └── server/      # Server-side handlers (runs on Clawdbot host)
+└── README.md
+```
 
-## Current State
+## Quick Start
 
-The CLI script exists at `scripts/edi` and is functional:
+### Client (local machine)
 
 ```bash
-# Basic usage
-edi "Hello, EDI!"
-edi "Please run the live tests for the wizard agent"
-
-# Piped input
-echo "message" | edi
-
-# Raw JSON output
-edi --raw "message"
+# From packages/client/
+./edi "Hello, EDI!"
+./edi "Please run the live tests"
+echo "message" | ./edi
 ```
+
+See [packages/client/README.md](packages/client/README.md) for full documentation.
+
+### Server (Clawdbot host)
+
+Server-side code lives in `packages/server/` and runs on the headless Linux server.
+
+See [packages/server/README.md](packages/server/README.md) for details.
 
 ## Architecture
 
 ```
-scripts/edi (Python CLI)
-    │
-    ▼
-HTTPS POST to EDI_ENDPOINT
-    │
-    ▼
-Clawdbot (autonomous agent on claude-base.tail342046.ts.net)
-    │
-    ▼
-Response: {"ok": true, "result": {"details": {"reply": "..."}}}
+┌─────────────────────┐                    ┌─────────────────────────────────┐
+│  packages/client/   │     HTTPS POST     │  packages/server/               │
+│  edi CLI            │ ─────────────────▶ │  (claude-base.ts.net)           │
+│  (local machine)    │                    │  Clawdbot autonomous agent      │
+└─────────────────────┘                    └─────────────────────────────────┘
 ```
 
-## Configuration
+## Contributors
 
-Current hardcoded values in `scripts/edi`:
-- `EDI_ENDPOINT`: `https://claude-base.tail342046.ts.net/tools/invoke`
-- `EDI_TOKEN`: Bearer token for auth
-- `SESSION_KEY`: `"main"` (determines which Clawdbot session receives messages)
-
-## Potential Improvements
-
-1. **Configuration externalization**: Move endpoint/token/session to `nexus.toml` or environment variables
-2. **Session management**: Allow specifying different session keys
-3. **Async support**: For longer-running tasks
-4. **Response streaming**: For real-time feedback from EDI
-5. **Error handling**: More graceful degradation
-6. **Integration with NEXUS CLI**: `nexus edi "message"` syntax
-
-## Files
-
-- `scripts/edi` - Main CLI script (115 lines)
-
-## Testing
-
-The EDI CLI can be tested by sending simple messages:
-```bash
-edi "ping"
-edi "What time is it?"
-```
-
-## Related
-
-This tool enables:
-- Automated test runs via agent delegation
-- Agent-to-agent task coordination
-- Remote command execution through Clawdbot
+- **pythagorakase** - Client development
+- **EDI (Clawdbot)** - Server development
