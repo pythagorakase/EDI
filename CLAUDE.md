@@ -107,7 +107,10 @@ X-EDI-Timestamp: <unix_timestamp>
 X-EDI-Signature: <hex_hmac_sha256>
 ```
 
-Signature is computed as: `HMAC-SHA256(secret, "{timestamp}:{message}")`
+Signature is computed as: `HMAC-SHA256(secret, "{timestamp}:{canonical_json_payload}")`
+
+Where `canonical_json_payload` is the request body serialized with sorted keys and no whitespace:
+`{"message":"...","threadId":null,"timeoutSeconds":120}`
 
 ### Setup
 

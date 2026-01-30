@@ -28,7 +28,7 @@ import urllib.request
 import urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 # Configuration
 CLAWDBOT_URL = "http://127.0.0.1:18789"
@@ -43,6 +43,7 @@ POLL_INTERVAL = 1.0  # seconds between polls
 AUTH_SECRET_ENV = "EDI_AUTH_SECRET"
 AUTH_SECRET_FILE = Path("/etc/edi/secret")
 AUTH_TIMESTAMP_TOLERANCE = 300  # 5 minutes in seconds
+MAX_REQUEST_SIZE = 1024 * 1024  # 1MB
 
 
 def load_auth_secret() -> Optional[bytes]:
@@ -77,7 +78,7 @@ def verify_hmac_signature(
     timestamp: str,
     signature: str,
     secret: bytes
-) -> tuple[bool, str]:
+) -> Tuple[bool, str]:
     """Verify HMAC signature.
 
     Returns (is_valid, error_message).
@@ -254,6 +255,9 @@ class EDIHandler(BaseHTTPRequestHandler):
         # Parse request body
         try:
             length = int(self.headers.get('Content-Length', 0))
+            if length > MAX_REQUEST_SIZE:
+                self._send_json(413, {"ok": False, "error": "Request too large"})
+                return
             body = json.loads(self.rfile.read(length)) if length else {}
         except json.JSONDecodeError:
             self._send_json(400, {"ok": False, "error": "Invalid JSON"})
@@ -277,7 +281,7 @@ class EDIHandler(BaseHTTPRequestHandler):
             is_valid, error = verify_hmac_signature(body, timestamp, signature, auth_secret)
             if not is_valid:
                 self.log_message(f"Auth failed: {error}")
-                self._send_json(401, {"ok": False, "error": f"Authentication failed: {error}"})
+                self._send_json(401, {"ok": False, "error": "Authentication failed"})
                 return
         
         timeout_seconds = body.get("timeoutSeconds", DEFAULT_TIMEOUT)

@@ -57,8 +57,8 @@ def load_secret() -> Optional[bytes]:
             secret = SECRET_FILE.read_text().strip()
             if secret:
                 return secret.encode()
-        except Exception:
-            pass
+        except (IOError, OSError) as e:
+            print(f"Warning: Cannot read secret file {SECRET_FILE}: {e}", file=sys.stderr)
     return None
 
 
