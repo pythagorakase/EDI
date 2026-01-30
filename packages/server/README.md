@@ -1,6 +1,6 @@
 # EDI-Link Thread Server
 
-Server-side component of EDI-Link. Runs on EDI's host (`claude-base.tail342046.ts.net`).
+Server-side component of EDI-Link. Runs on EDI's host (`edi-base.tail342046.ts.net`).
 
 ## Overview
 

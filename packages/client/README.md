@@ -31,7 +31,7 @@ edi CLI (Python)
 HTTP POST to EDI-Link Thread Server
     │
     ▼
-EDI (Clawdbot instance on claude-base)
+EDI (Clawdbot instance on edi-base)
     │
     ▼
 Response: {"ok": true, "reply": "...", "threadId": "..."}
@@ -40,7 +40,7 @@ Response: {"ok": true, "reply": "...", "threadId": "..."}
 ## Configuration
 
 Current hardcoded values in `scripts/edi`:
-- `EDI_ENDPOINT`: `https://claude-base.tail342046.ts.net/tools/invoke`
+- `EDI_ENDPOINT`: `https://edi-base.tail342046.ts.net/tools/invoke`
 - `EDI_TOKEN`: Bearer token for auth
 - `SESSION_KEY`: `"main"` (determines which Clawdbot session receives messages)
 

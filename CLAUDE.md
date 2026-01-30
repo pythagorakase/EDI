@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```
 Claude Code CLI  ──HTTP POST──▶  EDI-Link Thread Server  ──▶  EDI (Clawdbot)
-(packages/client/edi)           (packages/server/)           (claude-base:18789)
+(packages/client/edi)           (packages/server/)           (edi-base:18789)
 ```
 
 **Key architectural concepts:**
