@@ -20,6 +20,7 @@ Claude Code CLI  ──HTTP POST──▶  EDI-Link Thread Server  ──▶  ED
 - **Thread Server** generates and owns thread IDs (8-char UUID prefixes)
 - **New threads** use `/hooks/agent` endpoint with polling for response
 - **Thread continuations** use `/tools/invoke` → `sessions_send` for synchronous reply
+- **Dispatch** uses headless agents (codex/claude/gemini) with JSONL thread logs
 - Session keys follow pattern: `edi:<threadId>` mapped to `agent:main:edi:<threadId>`
 
 ## Commands
@@ -56,6 +57,20 @@ edi --show-thread "message"
 echo "message" | edi
 ```
 
+### Dispatch Usage (server API)
+```bash
+# Dispatch a headless agent task (returns taskId + threadId)
+curl -X POST http://127.0.0.1:19001/dispatch \
+  -H "Content-Type: application/json" \
+  -d '{"agent":"codex","message":"Run tests and summarize failures","threadId":null}'
+
+# List running/canceling tasks
+curl http://127.0.0.1:19001/tasks
+
+# Fetch thread history (JSONL-backed)
+curl http://127.0.0.1:19001/thread/<thread-id>
+```
+
 ## Key Files
 
 | File | Purpose |
@@ -71,6 +86,10 @@ echo "message" | edi
 - `LISTEN_PORT = 19001`
 - `POLL_INTERVAL = 1.0` seconds
 - `DEFAULT_TIMEOUT = 120` seconds
+- `DISPATCH_DEFAULT_TIMEOUT = 3600` seconds (env: `EDI_DISPATCH_DEFAULT_TIMEOUT`)
+- `DISPATCH_DEFAULT_WORKDIR = ~/nexus` (env: `EDI_DISPATCH_WORKDIR`)
+- `DISPATCH_MAX_TURNS = 25` (env: `EDI_DISPATCH_MAX_TURNS`)
+- Thread logs stored at `~/.edi-link/threads/<threadId>.jsonl`
 
 **Client** (`edi`):
 - Endpoint: `http://100.104.206.23:19001/ask`
@@ -89,6 +108,9 @@ echo "message" | edi
 - Request format: `{"message": "...", "threadId": null | "existing-id"}`
 - Response format: `{"ok": true, "reply": "...", "threadId": "..."}`
 - Error responses include `"ok": false` with error details
+- Dispatch endpoint: `POST /dispatch` with `agent`, `message`, optional `threadId`, `timeout`, `workdir`
+- Task status endpoint: `GET /tasks` (running/canceling only)
+- Thread history endpoint: `GET /thread/<threadId>`
 
 ## Authentication
 
