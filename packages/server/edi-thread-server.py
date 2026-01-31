@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-EDI Thread Server v3 - Server-side threading with session continuity.
+EDI Thread Server v4 - Server-side threading with session continuity.
 
 Flow:
 1. Client sends message (optionally with threadId)
@@ -14,21 +14,37 @@ Endpoints:
     Body: {"message": "...", "threadId": null | "<id>", "timeoutSeconds": 120}
     Returns: {"ok": true, "reply": "...", "threadId": "<server-generated-or-existing>"}
 
+  POST /dispatch
+    Body: {"agent": "codex|claude|gemini", "message": "...", "threadId": "<id>", "timeout": 3600}
+    Returns: {"ok": true, "taskId": "...", "threadId": "...", "status": "running"}
+
+  GET /tasks
+    Returns: {"ok": true, "tasks": [...]}
+
+  POST /tasks/<taskId>/cancel
+    Returns: {"ok": true, "status": "canceling"}
+
+  GET /thread/<threadId>
+    Returns: {"ok": true, "threadId": "...", "entries": [...]}
+
   GET /health
-    Returns: {"ok": true, "server": "edi-thread-server", "version": "3"}
+    Returns: {"ok": true, "server": "edi-thread-server", "version": "4"}
 """
 
 import hashlib
 import hmac
 import json
 import os
-import uuid
+import subprocess
+import threading
 import time
 import urllib.request
 import urllib.error
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import uuid
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
+from urllib.parse import urlparse
 
 # Configuration
 CLAWDBOT_URL = "http://127.0.0.1:18789"
@@ -38,6 +54,19 @@ LISTEN_PORT = 19001
 LISTEN_HOST = "0.0.0.0"  # Accessible via Tailscale
 DEFAULT_TIMEOUT = 120
 POLL_INTERVAL = 1.0  # seconds between polls
+
+# Dispatch configuration
+DISPATCH_DEFAULT_TIMEOUT = int(os.environ.get("EDI_DISPATCH_DEFAULT_TIMEOUT", "3600"))
+DISPATCH_DEFAULT_WORKDIR = Path(
+    os.environ.get("EDI_DISPATCH_WORKDIR", str(Path.home() / "nexus"))
+).expanduser()
+DISPATCH_MAX_TURNS = int(os.environ.get("EDI_DISPATCH_MAX_TURNS", "25"))
+THREADS_DIR = Path.home() / ".edi-link" / "threads"
+
+# Dispatch runtime state
+TASKS_LOCK = threading.Lock()
+TASKS: Dict[str, Dict[str, Any]] = {}
+THREAD_LOCK = threading.Lock()
 
 # HMAC Authentication
 AUTH_SECRET_ENV = "EDI_AUTH_SECRET"
@@ -232,124 +261,582 @@ def poll_for_response(session_key: str, timeout_seconds: int, initial_delay: flo
     return None
 
 
+def ensure_threads_dir() -> None:
+    """Ensure the thread storage directory exists."""
+    THREADS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def thread_file_path(thread_id: str) -> Path:
+    """Return the JSONL path for a thread."""
+    return THREADS_DIR / f"{thread_id}.jsonl"
+
+
+def load_thread_entries(thread_id: str) -> List[Dict[str, Any]]:
+    """Load thread entries from disk."""
+    path = thread_file_path(thread_id)
+    if not path.exists():
+        return []
+
+    with THREAD_LOCK:
+        try:
+            lines = path.read_text().splitlines()
+        except OSError:
+            return []
+
+    entries: List[Dict[str, Any]] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return entries
+
+
+def append_thread_entry(thread_id: str, entry: Dict[str, Any]) -> None:
+    """Append a JSONL entry to the thread log."""
+    ensure_threads_dir()
+    path = thread_file_path(thread_id)
+    line = json.dumps(entry, separators=(",", ":"))
+    with THREAD_LOCK:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+
+
+def next_turn_number(entries: List[Dict[str, Any]]) -> int:
+    """Compute the next turn number for a thread."""
+    max_turn = 0
+    for entry in entries:
+        turn = entry.get("turn")
+        try:
+            turn_value = int(turn)
+        except (TypeError, ValueError):
+            continue
+        if turn_value > max_turn:
+            max_turn = turn_value
+    return max_turn + 1
+
+
+def existing_agent_for_thread(entries: List[Dict[str, Any]]) -> Optional[str]:
+    """Return the agent role used in a thread, if any."""
+    agents = {entry.get("role") for entry in entries if entry.get("role") not in (None, "edi")}
+    if len(agents) == 1:
+        return next(iter(agents))
+    if len(agents) > 1:
+        return "__mixed__"
+    return None
+
+
+def filter_entries_for_prompt(entries: List[Dict[str, Any]], max_turns: int) -> List[Dict[str, Any]]:
+    """Return entries limited to the most recent N turns."""
+    if max_turns <= 0:
+        return []
+
+    turn_order: List[int] = []
+    seen_turns = set()
+    for entry in entries:
+        turn = entry.get("turn")
+        if isinstance(turn, int) and turn not in seen_turns:
+            seen_turns.add(turn)
+            turn_order.append(turn)
+
+    if len(turn_order) <= max_turns:
+        return entries
+
+    selected_turns = set(turn_order[-max_turns:])
+    return [entry for entry in entries if entry.get("turn") in selected_turns]
+
+
+def agent_label(agent: str) -> str:
+    """Return a human-friendly label for an agent."""
+    labels = {
+        "codex": "Codex",
+        "claude": "Claude",
+        "gemini": "Gemini",
+    }
+    return labels.get(agent, agent.title())
+
+
+def build_dispatch_prompt(entries: List[Dict[str, Any]], new_message: str, agent: str) -> str:
+    """Build a prompt for the dispatch agent."""
+    lines: List[str] = []
+    lines.append("You are continuing a task. Here is the conversation so far:")
+    lines.append("")
+    lines.append("---")
+
+    label = agent_label(agent)
+    for entry in entries:
+        role = entry.get("role")
+        content = entry.get("content", "")
+        prefix = "EDI" if role == "edi" else label
+        lines.append(f"[{prefix}] {content}")
+
+    lines.append("---")
+    lines.append("")
+    lines.append("Now continue:")
+    lines.append(f"[EDI] {new_message}")
+    return "\n".join(lines)
+
+
+def build_agent_command(agent: str, prompt: str, workdir: Path) -> Tuple[List[str], Path]:
+    """Build the command to run a headless agent."""
+    if agent == "codex":
+        cmd = [
+            "codex",
+            "exec",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--color",
+            "never",
+            "--skip-git-repo-check",
+            "-C",
+            str(workdir),
+            prompt,
+        ]
+        return cmd, workdir
+
+    if agent == "claude":
+        cmd = [
+            "claude",
+            "-p",
+            "--output-format",
+            "text",
+            "--permission-mode",
+            "bypassPermissions",
+            "--allow-dangerously-skip-permissions",
+            "--dangerously-skip-permissions",
+            "--no-session-persistence",
+            prompt,
+        ]
+        return cmd, workdir
+
+    if agent == "gemini":
+        cmd = [
+            "gemini",
+            "-p",
+            prompt,
+            "--output-format",
+            "text",
+            "--approval-mode",
+            "yolo",
+        ]
+        return cmd, workdir
+
+    raise ValueError(f"Unsupported agent: {agent}")
+
+
+def send_dispatch_callback(session_key: str, message: str, timeout_seconds: int) -> None:
+    """Send a callback message into an existing EDI session."""
+    if session_key.startswith("agent:"):
+        full_key = session_key
+    else:
+        full_key = f"agent:main:{session_key}"
+
+    make_request("/tools/invoke", {
+        "tool": "sessions_send",
+        "args": {
+            "sessionKey": full_key,
+            "message": message,
+            "timeoutSeconds": timeout_seconds,
+        }
+    }, GATEWAY_TOKEN)
+
+
+def run_dispatch_task(
+    task_id: str,
+    thread_id: str,
+    turn: int,
+    agent: str,
+    prompt: str,
+    workdir: Path,
+    timeout_seconds: int,
+    callback: Optional[Dict[str, Any]],
+) -> None:
+    """Run a headless agent task in the background."""
+    output = ""
+    exit_code: Optional[int] = None
+    error: Optional[str] = None
+
+    try:
+        cmd, cwd = build_agent_command(agent, prompt, workdir)
+        env = os.environ.copy()
+        env["NO_COLOR"] = "1"
+
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(cwd),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+
+        with TASKS_LOCK:
+            task = TASKS.get(task_id, {})
+            task["_process"] = process
+            task["pid"] = process.pid
+            TASKS[task_id] = task
+
+        try:
+            output, _ = process.communicate(timeout=timeout_seconds)
+            exit_code = process.returncode
+        except subprocess.TimeoutExpired:
+            process.kill()
+            output, _ = process.communicate()
+            exit_code = process.returncode
+            error = "timeout"
+    except Exception as exc:
+        error = str(exc)
+
+    output = (output or "").strip()
+    if error and not output:
+        output = f"Error: {error}"
+
+    append_thread_entry(thread_id, {
+        "turn": turn,
+        "role": agent,
+        "content": output,
+        "ts": int(time.time()),
+        "exitCode": exit_code,
+    })
+
+    status = "completed"
+    if error:
+        status = "failed"
+    elif exit_code not in (0, None):
+        status = "failed"
+
+    with TASKS_LOCK:
+        task = TASKS.get(task_id, {})
+        if task.get("cancel_requested"):
+            status = "canceled"
+        task["status"] = status
+        task["endedAt"] = int(time.time())
+        task["exitCode"] = exit_code
+        if error:
+            task["error"] = error
+        TASKS[task_id] = task
+
+    if callback and callback.get("sessionKey"):
+        callback_message = "\n".join([
+            "[EDI-Link Dispatch Result]",
+            f"Thread: {thread_id}",
+            f"Task: {task_id}",
+            f"Agent: {agent}",
+            f"Status: {status}",
+            f"Exit code: {exit_code}",
+            "",
+            output,
+        ])
+        send_dispatch_callback(callback["sessionKey"], callback_message, DEFAULT_TIMEOUT)
+
+
 class EDIHandler(BaseHTTPRequestHandler):
     """HTTP request handler for EDI thread server."""
+
+    def _read_json_body(self) -> Optional[Dict[str, Any]]:
+        """Read and parse JSON body (returns None on error after sending response)."""
+        try:
+            length = int(self.headers.get('Content-Length', 0))
+        except ValueError:
+            self._send_json(400, {"ok": False, "error": "Invalid Content-Length"})
+            return None
+
+        if length > MAX_REQUEST_SIZE:
+            self._send_json(413, {"ok": False, "error": "Request too large"})
+            return None
+
+        raw = self.rfile.read(length) if length else b""
+        if not raw:
+            return {}
+
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            self._send_json(400, {"ok": False, "error": "Invalid JSON"})
+            return None
+
+    def _require_auth(self, payload: Dict[str, Any]) -> bool:
+        """Enforce HMAC authentication if configured."""
+        auth_secret = load_auth_secret()
+        if not auth_secret:
+            return True
+
+        timestamp = self.headers.get("X-EDI-Timestamp")
+        signature = self.headers.get("X-EDI-Signature")
+
+        if not timestamp or not signature:
+            self._send_json(401, {"ok": False, "error": "Missing authentication headers"})
+            return False
+
+        is_valid, error = verify_hmac_signature(payload, timestamp, signature, auth_secret)
+        if not is_valid:
+            self.log_message(f"Auth failed: {error}")
+            self._send_json(401, {"ok": False, "error": "Authentication failed"})
+            return False
+
+        return True
     
     def do_GET(self):
         """Handle GET requests (health check)."""
-        if self.path == "/health":
+        parsed = urlparse(self.path)
+
+        if parsed.path == "/health":
             self._send_json(200, {
                 "ok": True,
                 "server": "edi-thread-server",
-                "version": "3"
+                "version": "4"
             })
+            return
+
+        if parsed.path == "/tasks":
+            with TASKS_LOCK:
+                tasks = []
+                for task in TASKS.values():
+                    status = task.get("status")
+                    if status not in {"running", "canceling"}:
+                        continue
+                    tasks.append({
+                        k: v
+                        for k, v in task.items()
+                        if not k.startswith("_") and k != "cancel_requested"
+                    })
+            tasks.sort(key=lambda item: item.get("startedAt", 0))
+            self._send_json(200, {"ok": True, "tasks": tasks})
+            return
+
+        if parsed.path.startswith("/thread/"):
+            thread_id = parsed.path.split("/thread/", 1)[1]
+            if not thread_id:
+                self._send_json(400, {"ok": False, "error": "threadId required"})
+                return
+
+            entries = load_thread_entries(thread_id)
+            if not entries:
+                path = thread_file_path(thread_id)
+                if not path.exists():
+                    self._send_json(404, {"ok": False, "error": "thread not found"})
+                    return
+            self._send_json(200, {"ok": True, "threadId": thread_id, "entries": entries})
+            return
+
         else:
             self.send_error(404)
     
     def do_POST(self):
         """Handle POST requests (ask endpoint)."""
-        if self.path != "/ask":
-            self.send_error(404)
-            return
+        parsed = urlparse(self.path)
 
-        # Parse request body
-        try:
-            length = int(self.headers.get('Content-Length', 0))
-            if length > MAX_REQUEST_SIZE:
-                self._send_json(413, {"ok": False, "error": "Request too large"})
-                return
-            body = json.loads(self.rfile.read(length)) if length else {}
-        except json.JSONDecodeError:
-            self._send_json(400, {"ok": False, "error": "Invalid JSON"})
-            return
-
-        message = body.get("message")
-        if not message:
-            self._send_json(400, {"ok": False, "error": "message required"})
-            return
-
-        # HMAC Authentication
-        auth_secret = load_auth_secret()
-        if auth_secret:
-            timestamp = self.headers.get("X-EDI-Timestamp")
-            signature = self.headers.get("X-EDI-Signature")
-
-            if not timestamp or not signature:
-                self._send_json(401, {"ok": False, "error": "Missing authentication headers"})
+        if parsed.path == "/ask":
+            body = self._read_json_body()
+            if body is None:
                 return
 
-            is_valid, error = verify_hmac_signature(body, timestamp, signature, auth_secret)
-            if not is_valid:
-                self.log_message(f"Auth failed: {error}")
-                self._send_json(401, {"ok": False, "error": "Authentication failed"})
+            message = body.get("message")
+            if not message:
+                self._send_json(400, {"ok": False, "error": "message required"})
                 return
-        
-        timeout_seconds = body.get("timeoutSeconds", DEFAULT_TIMEOUT)
-        
-        # Server generates thread ID if not provided (this is the key feature!)
-        thread_id = body.get("threadId")
-        is_new_thread = thread_id is None
-        
-        if is_new_thread:
-            thread_id = str(uuid.uuid4())[:8]
-        
-        session_key = f"edi:{thread_id}"
-        
-        self.log_message(f"{'New' if is_new_thread else 'Continue'} thread={thread_id}")
 
-        if is_new_thread:
-            # New thread: use /hooks/agent to create session
-            full_message = f"""[EDI CLI Request - Thread: {thread_id}]
+            if not self._require_auth(body):
+                return
+
+            timeout_seconds = body.get("timeoutSeconds", DEFAULT_TIMEOUT)
+
+            # Server generates thread ID if not provided (this is the key feature!)
+            thread_id = body.get("threadId")
+            is_new_thread = thread_id is None
+
+            if is_new_thread:
+                thread_id = str(uuid.uuid4())[:8]
+
+            session_key = f"edi:{thread_id}"
+
+            self.log_message(f"{'New' if is_new_thread else 'Continue'} thread={thread_id}")
+
+            if is_new_thread:
+                # New thread: use /hooks/agent to create session
+                full_message = f"""[EDI CLI Request - Thread: {thread_id}]
 
 You are EDI, responding to Claude Code (a coding assistant helping Neil with NEXUS).
 This is a NEW thread. Keep responses focused and technical.
 
 Request: {message}"""
 
-            hook_result = trigger_agent_hook(session_key, full_message, timeout_seconds)
+                hook_result = trigger_agent_hook(session_key, full_message, timeout_seconds)
 
-            if not hook_result.get("ok"):
-                self._send_json(500, {
-                    "ok": False,
-                    "error": f"Failed to trigger agent: {hook_result.get('error')}",
+                if not hook_result.get("ok"):
+                    self._send_json(500, {
+                        "ok": False,
+                        "error": f"Failed to trigger agent: {hook_result.get('error')}",
+                        "threadId": thread_id
+                    })
+                    return
+
+                run_id = hook_result.get("runId")
+                self.log_message(f"Agent triggered, runId={run_id}")
+
+                # Poll for response (hooks/agent is async, need to wait)
+                reply = poll_for_response(session_key, timeout_seconds)
+            else:
+                # Continue thread: use sessions_send for history preservation
+                self.log_message(f"Continuing thread={thread_id} via sessions_send")
+
+                result = continue_thread(session_key, message, timeout_seconds)
+
+                if not result.get("ok"):
+                    self._send_json(500, {
+                        "ok": False,
+                        "error": f"Failed to continue thread: {result.get('error')}",
+                        "threadId": thread_id
+                    })
+                    return
+
+                # Extract reply from sessions_send response (synchronous, no polling needed)
+                reply = extract_reply_from_send_result(result)
+
+            if reply:
+                self._send_json(200, {
+                    "ok": True,
+                    "reply": reply,
                     "threadId": thread_id
                 })
-                return
-
-            run_id = hook_result.get("runId")
-            self.log_message(f"Agent triggered, runId={run_id}")
-
-            # Poll for response (hooks/agent is async, need to wait)
-            reply = poll_for_response(session_key, timeout_seconds)
-        else:
-            # Continue thread: use sessions_send for history preservation
-            self.log_message(f"Continuing thread={thread_id} via sessions_send")
-
-            result = continue_thread(session_key, message, timeout_seconds)
-
-            if not result.get("ok"):
-                self._send_json(500, {
+            else:
+                self._send_json(504, {
                     "ok": False,
-                    "error": f"Failed to continue thread: {result.get('error')}",
+                    "error": "Timeout waiting for response",
                     "threadId": thread_id
                 })
+            return
+
+        if parsed.path == "/dispatch":
+            body = self._read_json_body()
+            if body is None:
                 return
 
-            # Extract reply from sessions_send response (synchronous, no polling needed)
-            reply = extract_reply_from_send_result(result)
+            if not self._require_auth(body):
+                return
 
-        if reply:
+            agent = body.get("agent")
+            message = body.get("message")
+            if not agent or not message:
+                self._send_json(400, {"ok": False, "error": "agent and message required"})
+                return
+
+            agent = str(agent).lower()
+            message = str(message)
+            if agent not in {"codex", "claude", "gemini"}:
+                self._send_json(400, {"ok": False, "error": "Unsupported agent"})
+                return
+
+            thread_id = body.get("threadId") or str(uuid.uuid4())
+            workdir = Path(body.get("workdir") or DISPATCH_DEFAULT_WORKDIR).expanduser()
+            try:
+                timeout_seconds = int(body.get("timeout") or body.get("timeoutSeconds") or DISPATCH_DEFAULT_TIMEOUT)
+            except (TypeError, ValueError):
+                self._send_json(400, {"ok": False, "error": "Invalid timeout value"})
+                return
+            callback = body.get("callback")
+
+            if callback is not None and not isinstance(callback, dict):
+                self._send_json(400, {"ok": False, "error": "callback must be an object"})
+                return
+
+            if not workdir.exists() or not workdir.is_dir():
+                self._send_json(400, {"ok": False, "error": f"workdir not found: {workdir}"})
+                return
+
+            entries = load_thread_entries(thread_id)
+            existing_agent = existing_agent_for_thread(entries)
+            if existing_agent == "__mixed__":
+                self._send_json(400, {"ok": False, "error": "Thread has mixed agents"})
+                return
+            if existing_agent and existing_agent != agent:
+                self._send_json(400, {"ok": False, "error": f"Thread already bound to {existing_agent}"})
+                return
+
+            filtered_entries = filter_entries_for_prompt(entries, DISPATCH_MAX_TURNS)
+            prompt = build_dispatch_prompt(filtered_entries, message, agent)
+
+            turn = next_turn_number(entries)
+            append_thread_entry(thread_id, {
+                "turn": turn,
+                "role": "edi",
+                "content": message,
+                "ts": int(time.time()),
+            })
+
+            task_id = str(uuid.uuid4())
+            with TASKS_LOCK:
+                TASKS[task_id] = {
+                    "taskId": task_id,
+                    "threadId": thread_id,
+                    "agent": agent,
+                    "status": "running",
+                    "startedAt": int(time.time()),
+                    "workdir": str(workdir),
+                    "timeout": timeout_seconds,
+                }
+
+            thread = threading.Thread(
+                target=run_dispatch_task,
+                args=(task_id, thread_id, turn, agent, prompt, workdir, timeout_seconds, callback),
+                daemon=True,
+            )
+            thread.start()
+
+            with TASKS_LOCK:
+                TASKS[task_id]["_thread"] = thread
+
             self._send_json(200, {
                 "ok": True,
-                "reply": reply,
-                "threadId": thread_id
+                "taskId": task_id,
+                "threadId": thread_id,
+                "status": "running",
             })
-        else:
-            self._send_json(504, {
-                "ok": False,
-                "error": "Timeout waiting for response",
-                "threadId": thread_id
-            })
+            return
+
+        if parsed.path.startswith("/tasks/") and parsed.path.endswith("/cancel"):
+            body = self._read_json_body()
+            if body is None:
+                return
+
+            if not self._require_auth(body):
+                return
+
+            task_id = parsed.path.split("/tasks/", 1)[1].rsplit("/cancel", 1)[0]
+            if not task_id:
+                self._send_json(400, {"ok": False, "error": "taskId required"})
+                return
+
+            with TASKS_LOCK:
+                task = TASKS.get(task_id)
+
+            if not task:
+                self._send_json(404, {"ok": False, "error": "task not found"})
+                return
+
+            if task.get("status") != "running":
+                self._send_json(200, {"ok": True, "status": task.get("status")})
+                return
+
+            with TASKS_LOCK:
+                task = TASKS.get(task_id, {})
+                task["cancel_requested"] = True
+                task["status"] = "canceling"
+                TASKS[task_id] = task
+                process = task.get("_process")
+
+            if process and process.poll() is None:
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+
+            self._send_json(200, {"ok": True, "status": "canceling"})
+            return
+
+        self.send_error(404)
     
     def _send_json(self, status: int, data: dict):
         """Send JSON response."""
@@ -371,13 +858,17 @@ Request: {message}"""
 def main():
     """Start the server."""
     print("=" * 60)
-    print("EDI Thread Server v3")
+    print("EDI Thread Server v4")
     print("=" * 60)
     print(f"Listening: http://{LISTEN_HOST}:{LISTEN_PORT}")
     print(f"Tailscale: http://100.104.206.23:{LISTEN_PORT}/ask")
     print()
     print("Endpoints:")
     print(f"  POST /ask  - Send message to EDI")
+    print(f"  POST /dispatch - Run a headless coding agent task")
+    print(f"  GET /tasks - List dispatch tasks")
+    print(f"  POST /tasks/<taskId>/cancel - Cancel a running task")
+    print(f"  GET /thread/<threadId> - Fetch thread history")
     print(f"  GET /health - Health check")
     print()
     print("Request format:")
@@ -399,7 +890,7 @@ def main():
     print("=" * 60)
     print()
     
-    server = HTTPServer((LISTEN_HOST, LISTEN_PORT), EDIHandler)
+    server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), EDIHandler)
     
     try:
         server.serve_forever()
