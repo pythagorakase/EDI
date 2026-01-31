@@ -35,6 +35,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -62,6 +63,7 @@ DISPATCH_DEFAULT_WORKDIR = Path(
 ).expanduser()
 DISPATCH_MAX_TURNS = int(os.environ.get("EDI_DISPATCH_MAX_TURNS", "25"))
 THREADS_DIR = Path.home() / ".edi-link" / "threads"
+THREAD_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # Dispatch runtime state
 TASKS_LOCK = threading.Lock()
@@ -266,14 +268,37 @@ def ensure_threads_dir() -> None:
     THREADS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def validate_thread_id(thread_id: str) -> str:
+    """Validate the thread ID to prevent path traversal."""
+    if not isinstance(thread_id, str):
+        raise ValueError("threadId must be a string")
+    if not thread_id:
+        raise ValueError("threadId required")
+    if "/" in thread_id or "\\" in thread_id or ".." in thread_id:
+        raise ValueError("Invalid threadId")
+    if not THREAD_ID_RE.fullmatch(thread_id):
+        raise ValueError("Invalid threadId")
+    return thread_id
+
+
 def thread_file_path(thread_id: str) -> Path:
     """Return the JSONL path for a thread."""
-    return THREADS_DIR / f"{thread_id}.jsonl"
+    thread_id = validate_thread_id(thread_id)
+    threads_dir = THREADS_DIR.resolve()
+    path = (threads_dir / f"{thread_id}.jsonl").resolve()
+    try:
+        path.relative_to(threads_dir)
+    except ValueError as exc:
+        raise ValueError("Invalid threadId") from exc
+    return path
 
 
 def load_thread_entries(thread_id: str) -> List[Dict[str, Any]]:
     """Load thread entries from disk."""
-    path = thread_file_path(thread_id)
+    try:
+        path = thread_file_path(thread_id)
+    except ValueError:
+        return []
     if not path.exists():
         return []
 
@@ -611,6 +636,11 @@ class EDIHandler(BaseHTTPRequestHandler):
             if not thread_id:
                 self._send_json(400, {"ok": False, "error": "threadId required"})
                 return
+            try:
+                thread_id = validate_thread_id(thread_id)
+            except ValueError:
+                self._send_json(400, {"ok": False, "error": "Invalid threadId"})
+                return
 
             entries = load_thread_entries(thread_id)
             if not entries:
@@ -649,6 +679,15 @@ class EDIHandler(BaseHTTPRequestHandler):
 
             if is_new_thread:
                 thread_id = str(uuid.uuid4())[:8]
+            else:
+                if not isinstance(thread_id, str):
+                    self._send_json(400, {"ok": False, "error": "Invalid threadId"})
+                    return
+                try:
+                    thread_id = validate_thread_id(thread_id)
+                except ValueError:
+                    self._send_json(400, {"ok": False, "error": "Invalid threadId"})
+                    return
 
             session_key = f"edi:{thread_id}"
 
@@ -729,7 +768,18 @@ Request: {message}"""
                 self._send_json(400, {"ok": False, "error": "Unsupported agent"})
                 return
 
-            thread_id = body.get("threadId") or str(uuid.uuid4())
+            raw_thread_id = body.get("threadId")
+            if raw_thread_id is None:
+                thread_id = str(uuid.uuid4())
+            else:
+                if not isinstance(raw_thread_id, str):
+                    self._send_json(400, {"ok": False, "error": "Invalid threadId"})
+                    return
+                try:
+                    thread_id = validate_thread_id(raw_thread_id)
+                except ValueError:
+                    self._send_json(400, {"ok": False, "error": "Invalid threadId"})
+                    return
             workdir = Path(body.get("workdir") or DISPATCH_DEFAULT_WORKDIR).expanduser()
             try:
                 timeout_seconds = int(body.get("timeout") or body.get("timeoutSeconds") or DISPATCH_DEFAULT_TIMEOUT)
