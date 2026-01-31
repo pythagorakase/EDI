@@ -63,7 +63,6 @@ See [packages/server/README.md](packages/server/README.md) for details.
 - **Conversation continuity** — Thread IDs allow multi-turn conversations with EDI
 - **Synchronous interface** — Polls EDI's async model into blocking request-response
 - **Tailscale access** — Secure remote access without public exposure
-- **Dispatch orchestration** — Headless coding agents with persisted thread logs
 
 ## Protocol
 
@@ -89,20 +88,6 @@ Response:
 
 - **Server endpoint**: `http://100.104.206.23:19001/ask` (via Tailscale)
 - **Health check**: `http://100.104.206.23:19001/health`
-
-## Dispatch API
-
-In addition to `/ask`, the server can dispatch headless coding agents and keep a
-JSONL thread log at `~/.edi-link/threads/<threadId>.jsonl` on the server host.
-
-```json
-POST /dispatch
-{
-  "agent": "codex",
-  "message": "Run tests and summarize failures",
-  "threadId": null
-}
-```
 
 ## Contributors
 
