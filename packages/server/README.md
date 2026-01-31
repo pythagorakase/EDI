@@ -9,6 +9,7 @@ The EDI-Link Thread Server provides a **synchronous HTTP interface** for Claude 
 - **Server-side thread ID generation** — Proper API design where EDI-Link owns identity
 - **Session creation and continuity** — Via EDI's `/hooks/agent` endpoint
 - **Response polling** — Converts EDI's async model to sync request-response
+- **Dispatch orchestration** — Runs headless coding agents with thread persistence
 
 ## Files
 
@@ -86,7 +87,88 @@ Health check endpoint.
 {
   "ok": true,
   "server": "edi-thread-server",
-  "version": "3"
+  "version": "4"
+}
+```
+
+### `POST /dispatch`
+
+Dispatch a headless coding agent (codex, claude, gemini). The server persists the
+thread history to disk (`~/.edi-link/threads/<threadId>.jsonl`) and feeds the
+conversation back into the prompt on each run.
+
+**Request:**
+```json
+{
+  "agent": "codex",
+  "message": "Run the test suite and summarize failures",
+  "threadId": "optional-thread-id",
+  "timeout": 3600,
+  "workdir": "/home/edi/nexus",
+  "callback": {
+    "sessionKey": "edi:abc12345"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "taskId": "uuid",
+  "threadId": "uuid",
+  "status": "running"
+}
+```
+
+### `GET /tasks`
+
+List dispatch tasks with their status.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "tasks": [
+    {
+      "taskId": "uuid",
+      "threadId": "uuid",
+      "agent": "codex",
+      "status": "running"
+    }
+  ]
+}
+```
+
+### `POST /tasks/<taskId>/cancel`
+
+Cancel a running dispatch task.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "status": "canceling"
+}
+```
+
+### `GET /thread/<threadId>`
+
+Fetch the persisted thread history.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "threadId": "uuid",
+  "entries": [
+    {
+      "turn": 1,
+      "role": "edi",
+      "content": "Run the tests",
+      "ts": 1738341000
+    }
+  ]
 }
 ```
 
@@ -160,6 +242,9 @@ LISTEN_PORT = 19001                         # Server port
 LISTEN_HOST = "0.0.0.0"                     # Bind address
 DEFAULT_TIMEOUT = 120                       # Default request timeout
 POLL_INTERVAL = 1.0                         # Polling interval (seconds)
+DISPATCH_DEFAULT_TIMEOUT = 3600             # Default dispatch timeout
+DISPATCH_DEFAULT_WORKDIR = ~/nexus          # Default dispatch working directory
+DISPATCH_MAX_TURNS = 25                     # Dispatch thread history window
 ```
 
 ## Network Access
