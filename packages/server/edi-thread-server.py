@@ -76,6 +76,10 @@ AUTH_SECRET_FILE = Path("/etc/edi/secret")
 AUTH_TIMESTAMP_TOLERANCE = 300  # 5 minutes in seconds
 MAX_REQUEST_SIZE = 1024 * 1024  # 1MB
 
+# GitHub Webhook Authentication (separate secret for defense in depth)
+GITHUB_WEBHOOK_SECRET_ENV = "EDI_GITHUB_SECRET"
+GITHUB_WEBHOOK_SECRET_FILE = Path("/etc/edi/github-secret")
+
 
 def load_auth_secret() -> Optional[bytes]:
     """Load shared secret for HMAC verification.
@@ -97,6 +101,38 @@ def load_auth_secret() -> Optional[bytes]:
             pass
 
     return None
+
+
+def load_github_secret() -> Optional[bytes]:
+    """Load GitHub webhook secret for signature verification.
+
+    Priority: environment variable > file > None (webhook auth disabled)
+    """
+    # Try environment variable first
+    secret = os.environ.get(GITHUB_WEBHOOK_SECRET_ENV)
+    if secret:
+        return secret.strip().encode()
+
+    # Try file fallback
+    if GITHUB_WEBHOOK_SECRET_FILE.exists():
+        try:
+            secret = GITHUB_WEBHOOK_SECRET_FILE.read_text().strip()
+            if secret:
+                return secret.encode()
+        except Exception:
+            pass
+
+    return None
+
+
+def verify_github_signature(payload: bytes, signature: str, secret: bytes) -> bool:
+    """Verify GitHub webhook signature (X-Hub-Signature-256 header).
+
+    GitHub sends: sha256=<hex-hmac>
+    We compute: HMAC-SHA256(secret, raw_payload)
+    """
+    expected = "sha256=" + hmac.new(secret, payload, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(signature, expected)
 
 
 def canonicalize_auth_payload(payload: Dict[str, Any]) -> str:
@@ -655,7 +691,12 @@ class EDIHandler(BaseHTTPRequestHandler):
             self.send_error(404)
     
     def do_POST(self):
-        """Handle POST requests (ask endpoint)."""
+        """Handle POST requests."""
+        # GitHub webhook gets special handling (different auth)
+        if self.path == "/github-webhook":
+            self._handle_github_webhook()
+            return
+
         parsed = urlparse(self.path)
 
         if parsed.path == "/ask":
@@ -896,7 +937,91 @@ Request: {message}"""
         self.send_header("Content-Length", len(response))
         self.end_headers()
         self.wfile.write(response)
-    
+
+    def _handle_github_webhook(self):
+        """Handle GitHub webhook for merge notifications.
+
+        Fire-and-forget pattern: triggers EDI and returns immediately.
+        """
+        # Read raw payload (needed for signature verification)
+        try:
+            length = int(self.headers.get('Content-Length', 0))
+            if length > MAX_REQUEST_SIZE:
+                self._send_json(413, {"ok": False, "error": "Request too large"})
+                return
+            raw_payload = self.rfile.read(length) if length else b""
+        except Exception as e:
+            self._send_json(400, {"ok": False, "error": f"Failed to read body: {e}"})
+            return
+
+        # Verify GitHub signature
+        github_secret = load_github_secret()
+        if github_secret:
+            signature = self.headers.get("X-Hub-Signature-256", "")
+            if not signature:
+                self._send_json(401, {"ok": False, "error": "Missing X-Hub-Signature-256 header"})
+                return
+
+            if not verify_github_signature(raw_payload, signature, github_secret):
+                self.log_message("GitHub webhook: Invalid signature")
+                self._send_json(401, {"ok": False, "error": "Invalid signature"})
+                return
+        else:
+            self.log_message("GitHub webhook: WARNING - No secret configured, skipping verification")
+
+        # Parse payload
+        try:
+            body = json.loads(raw_payload) if raw_payload else {}
+        except json.JSONDecodeError:
+            self._send_json(400, {"ok": False, "error": "Invalid JSON"})
+            return
+
+        # Extract fields from payload
+        repo = body.get("repository", "unknown/repo")
+        ref = body.get("ref", "refs/heads/unknown")
+        sha = body.get("sha", "unknown")
+        commit_message = body.get("message", "")
+
+        # Extract branch name from ref (refs/heads/main -> main)
+        branch = ref.split("/")[-1] if "/" in ref else ref
+
+        self.log_message(f"GitHub webhook: {repo} {branch} {sha[:7]}")
+
+        # Create session key using repo and short SHA
+        short_sha = sha[:7] if len(sha) >= 7 else sha
+        repo_name = repo.split("/")[-1] if "/" in repo else repo
+        session_key = f"github:{repo_name}:{short_sha}"
+
+        # Format message for EDI
+        message = f"""[GitHub Webhook - Repo Update]
+
+Repository: {repo}
+Branch: {branch}
+Commit: {short_sha}
+Message: "{commit_message[:200]}{'...' if len(commit_message) > 200 else ''}"
+
+Please pull the latest changes and run the test suite."""
+
+        # Fire-and-forget: trigger EDI but don't wait for response
+        hook_result = trigger_agent_hook(session_key, message, DEFAULT_TIMEOUT)
+
+        if hook_result.get("ok"):
+            run_id = hook_result.get("runId", "unknown")
+            self.log_message(f"GitHub webhook: Triggered EDI, runId={run_id}")
+            self._send_json(200, {
+                "ok": True,
+                "message": "Webhook received, EDI notified",
+                "runId": run_id,
+                "sessionKey": session_key
+            })
+        else:
+            error = hook_result.get("error", "Unknown error")
+            self.log_message(f"GitHub webhook: Failed to trigger EDI: {error}")
+            self._send_json(500, {
+                "ok": False,
+                "error": f"Failed to trigger EDI: {error}"
+            })
+
     def log_message(self, format, *args):
         """Custom log format."""
         if args:
@@ -914,12 +1039,13 @@ def main():
     print(f"Tailscale: http://100.104.206.23:{LISTEN_PORT}/ask")
     print()
     print("Endpoints:")
-    print(f"  POST /ask  - Send message to EDI")
-    print(f"  POST /dispatch - Run a headless coding agent task")
-    print(f"  GET /tasks - List dispatch tasks")
-    print(f"  POST /tasks/<taskId>/cancel - Cancel a running task")
-    print(f"  GET /thread/<threadId> - Fetch thread history")
-    print(f"  GET /health - Health check")
+    print(f"  POST /ask            - Send message to EDI")
+    print(f"  POST /dispatch       - Run a headless coding agent task")
+    print(f"  POST /github-webhook - GitHub merge notifications")
+    print(f"  GET  /tasks          - List dispatch tasks")
+    print(f"  POST /tasks/<id>/cancel - Cancel a running task")
+    print(f"  GET  /thread/<id>    - Fetch thread history")
+    print(f"  GET  /health         - Health check")
     print()
     print("Request format:")
     print('  {"message": "...", "threadId": null}     # New thread')
@@ -936,6 +1062,16 @@ def main():
     else:
         print("Authentication: DISABLED (no secret configured)")
         print(f"  Set {AUTH_SECRET_ENV} env var or create {AUTH_SECRET_FILE}")
+
+    print()
+
+    # GitHub webhook status
+    github_secret = load_github_secret()
+    if github_secret:
+        print("GitHub Webhook: ENABLED (signature verification)")
+    else:
+        print("GitHub Webhook: DISABLED (no secret configured)")
+        print(f"  Set {GITHUB_WEBHOOK_SECRET_ENV} env var or create {GITHUB_WEBHOOK_SECRET_FILE}")
 
     print("=" * 60)
     print()
