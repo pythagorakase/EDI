@@ -112,6 +112,73 @@ curl http://127.0.0.1:19001/thread/<thread-id>
 - Task status endpoint: `GET /tasks` (running/canceling only)
 - Thread history endpoint: `GET /thread/<threadId>`
 
+## GitHub Webhook Integration
+
+The thread server accepts webhook notifications from GitHub Actions when branches are merged to main. This allows EDI to automatically pull and test updates.
+
+### Endpoint
+
+```
+POST /github-webhook
+```
+
+### Request Format
+
+```json
+{
+  "repository": "pythagorakase/nexus",
+  "ref": "refs/heads/main",
+  "sha": "abc1234567890...",
+  "message": "Commit message here"
+}
+```
+
+### Headers
+
+```
+Content-Type: application/json
+X-Hub-Signature-256: sha256=<hmac-hex-digest>
+```
+
+### Signature Verification
+
+The signature is computed as:
+```
+HMAC-SHA256(secret, raw_json_payload)
+```
+
+Formatted as `sha256=<hex-digest>` (same format as native GitHub webhooks).
+
+### Secret Configuration
+
+On the EDI server host (choose one):
+
+```bash
+# Option 1: Environment variable (preferred)
+export EDI_GITHUB_SECRET="<hex-secret>"
+
+# Option 2: File
+echo "<hex-secret>" > /etc/edi/github-secret
+chmod 600 /etc/edi/github-secret
+```
+
+Generate a new secret:
+```bash
+openssl rand -hex 32
+```
+
+### GitHub Repository Secrets Required
+
+- `TS_OAUTH_CLIENT_ID`: Tailscale OAuth client ID (for network access)
+- `TS_OAUTH_SECRET`: Tailscale OAuth secret
+- `EDI_GITHUB_SECRET`: Shared secret for HMAC signature verification
+
+### Behavior
+
+- Fire-and-forget: returns 200 immediately after triggering EDI
+- Creates sessions with key pattern: `github:<repo-name>:<short-sha>`
+- EDI receives a formatted message requesting it to pull and run tests
+
 ## Authentication
 
 EDI-Link uses HMAC-SHA256 to verify that messages originate from trusted sources.
