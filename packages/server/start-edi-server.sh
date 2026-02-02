@@ -20,6 +20,9 @@ start() {
         source "$ENV_FILE"
     fi
 
+    # Ensure coding agent CLIs are in PATH
+    export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
+
     echo "Starting EDI Thread Server..."
     nohup env EDI_AUTH_SECRET="${EDI_AUTH_SECRET:-}" python3 "$SERVER_SCRIPT" > "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
