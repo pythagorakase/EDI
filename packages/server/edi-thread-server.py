@@ -956,18 +956,20 @@ Request: {message}"""
 
         # Verify GitHub signature
         github_secret = load_github_secret()
-        if github_secret:
-            signature = self.headers.get("X-Hub-Signature-256", "")
-            if not signature:
-                self._send_json(401, {"ok": False, "error": "Missing X-Hub-Signature-256 header"})
-                return
+        if not github_secret:
+            self.log_message("GitHub webhook: Rejecting request - No secret configured")
+            self._send_json(503, {"ok": False, "error": "GitHub webhook secret not configured"})
+            return
 
-            if not verify_github_signature(raw_payload, signature, github_secret):
-                self.log_message("GitHub webhook: Invalid signature")
-                self._send_json(401, {"ok": False, "error": "Invalid signature"})
-                return
-        else:
-            self.log_message("GitHub webhook: WARNING - No secret configured, skipping verification")
+        signature = self.headers.get("X-Hub-Signature-256", "")
+        if not signature:
+            self._send_json(401, {"ok": False, "error": "Missing X-Hub-Signature-256 header"})
+            return
+
+        if not verify_github_signature(raw_payload, signature, github_secret):
+            self.log_message("GitHub webhook: Invalid signature")
+            self._send_json(401, {"ok": False, "error": "Invalid signature"})
+            return
 
         # Parse payload
         try:
