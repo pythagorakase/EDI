@@ -2,7 +2,7 @@
 """
 EDI Communication CLI
 
-Sends messages to the EDI agent (Clawdbot) via the Thread Server HTTP API.
+Sends messages to the EDI agent (OpenClaw-based) via the Thread Server HTTP API.
 EDI is an autonomous agent that can help with testing and other tasks.
 
 Usage:
@@ -107,7 +107,7 @@ def send_to_edi(message: str, thread_id: Optional[str] = None) -> Tuple[str, Opt
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Send messages to EDI (Clawdbot autonomous agent)",
+        description="Send messages to EDI (OpenClaw-based agent)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )

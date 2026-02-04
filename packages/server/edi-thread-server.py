@@ -173,7 +173,7 @@ def verify_hmac_signature(
 
 
 def make_request(path: str, payload: Optional[dict], token: str, method: str = "POST") -> dict:
-    """Make authenticated request to Clawdbot gateway."""
+    """Make authenticated request to the OpenClaw gateway."""
     url = f"{CLAWDBOT_URL}{path}"
     data = json.dumps(payload).encode() if payload else None
     

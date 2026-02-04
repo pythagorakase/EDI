@@ -1,0 +1,18 @@
+[Unit]
+Description=EDI-Link Thread Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/EDI/packages/server
+ExecStart=/usr/bin/python3 %h/EDI/packages/server/edi-thread-server.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=-/etc/edi/env
+Environment=PATH=%h/.npm-global/bin:%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

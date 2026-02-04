@@ -4,15 +4,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**EDI-Link** is the communication system that enables Claude Code to communicate with **EDI**, a Clawdbot instance running on a remote host via Tailscale. EDI-Link converts EDI's asynchronous agent model into a synchronous request-response API.
+This is a **monorepo for EDI utilities** — tools and systems built for EDI that live outside the OpenClaw framework. Each utility is a self-contained package under `packages/`.
 
-- **EDI** = the Clawdbot agent instance (the remote autonomous agent)
-- **EDI-Link** = this communication system (client CLI + thread server)
+- **EDI** = the OpenClaw agent instance (the remote autonomous agent)
+- **This repo** = standalone utilities that extend EDI's capabilities
 
-## Architecture
+## Packages
+
+| Package | Path | Purpose |
+|---------|------|---------|
+| **EDI-Link** | `packages/client/`, `packages/server/` | Communication system (client CLI + thread server) |
+| **Memory Import** | `packages/memory-import/` | Chat export ingestion pipeline |
+
+## EDI-Link
+
+EDI-Link enables Claude Code to communicate with EDI via Tailscale. It converts EDI's asynchronous agent model into a synchronous request-response API.
+
+### Architecture
 
 ```
-Claude Code CLI  ──HTTP POST──▶  EDI-Link Thread Server  ──▶  EDI (Clawdbot)
+Claude Code CLI  ──HTTP POST──▶  EDI-Link Thread Server  ──▶  EDI (OpenClaw)
 (packages/client/edi)           (packages/server/)           (edi-base:18789)
 ```
 
@@ -23,11 +34,19 @@ Claude Code CLI  ──HTTP POST──▶  EDI-Link Thread Server  ──▶  ED
 - **Dispatch** uses headless agents (codex/claude/gemini) with JSONL thread logs
 - Session keys follow pattern: `edi:<threadId>` mapped to `agent:main:edi:<threadId>`
 
-## Commands
+### Commands
 
-### Server Management
+#### Server Management
 ```bash
-# Start/stop/restart the thread server
+# Systemd user service (recommended)
+mkdir -p ~/.config/systemd/user
+cp packages/server/edi-thread-server.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now edi-thread-server
+systemctl --user status edi-thread-server
+journalctl --user -u edi-thread-server -f
+
+# Legacy script (nohup)
 ./packages/server/start-edi-server.sh start
 ./packages/server/start-edi-server.sh stop
 ./packages/server/start-edi-server.sh status
@@ -35,11 +54,11 @@ Claude Code CLI  ──HTTP POST──▶  EDI-Link Thread Server  ──▶  ED
 # Check server health
 curl http://127.0.0.1:19001/health
 
-# View server logs
+# Legacy logs
 tail -f /tmp/edi-server.log
 ```
 
-### Client Usage
+#### Client Usage
 ```bash
 # Send message (auto-continues last thread or starts new)
 edi "your message"
@@ -57,7 +76,7 @@ edi --show-thread "message"
 echo "message" | edi
 ```
 
-### Dispatch Usage (server API)
+#### Dispatch Usage (server API)
 ```bash
 # Dispatch a headless agent task (returns taskId + threadId)
 curl -X POST http://127.0.0.1:19001/dispatch \
@@ -76,15 +95,16 @@ curl http://127.0.0.1:19001/tasks
 curl http://127.0.0.1:19001/thread/<thread-id>
 ```
 
-## Key Files
+### Key Files
 
 | File | Purpose |
 |------|---------|
 | `packages/client/edi` | Python CLI (~145 lines) - sends messages via HTTP |
 | `packages/server/edi-thread-server.py` | Python HTTP server (~316 lines) - threading and polling logic |
 | `packages/server/start-edi-server.sh` | Bash script - server lifecycle management |
+| `packages/server/edi-thread-server.service` | systemd user unit (recommended) |
 
-## Configuration (Hardcoded)
+### Configuration (Hardcoded)
 
 **Server** (`edi-thread-server.py`):
 - `CLAWDBOT_URL = "http://127.0.0.1:18789"`
@@ -101,14 +121,14 @@ curl http://127.0.0.1:19001/thread/<thread-id>
 - Endpoint: `http://100.104.206.23:19001/ask`
 - Thread persistence: `~/.edi-thread`
 
-## Dependencies
+### Dependencies
 
 - **Python 3.8+** for both client and server
 - **requests** library for client only
 - Server uses standard library only
 - **Tailscale** required for client-to-server connectivity
 
-## Protocol Notes
+### Protocol Notes
 
 - Thread IDs are server-generated (client never creates them)
 - Request format: `{"message": "...", "threadId": null | "existing-id"}`
@@ -118,17 +138,17 @@ curl http://127.0.0.1:19001/thread/<thread-id>
 - Task status endpoint: `GET /tasks` (running/canceling only)
 - Thread history endpoint: `GET /thread/<threadId>`
 
-## GitHub Webhook Integration
+### GitHub Webhook Integration
 
 The thread server accepts webhook notifications from GitHub Actions when branches are merged to main. This allows EDI to automatically pull and test updates.
 
-### Endpoint
+#### Endpoint
 
 ```
 POST /github-webhook
 ```
 
-### Request Format
+#### Request Format
 
 ```json
 {
@@ -139,14 +159,14 @@ POST /github-webhook
 }
 ```
 
-### Headers
+#### Headers
 
 ```
 Content-Type: application/json
 X-Hub-Signature-256: sha256=<hmac-hex-digest>
 ```
 
-### Signature Verification
+#### Signature Verification
 
 The signature is computed as:
 ```
@@ -155,7 +175,7 @@ HMAC-SHA256(secret, raw_json_payload)
 
 Formatted as `sha256=<hex-digest>` (same format as native GitHub webhooks).
 
-### Secret Configuration
+#### Secret Configuration
 
 On the EDI server host (choose one):
 
@@ -173,29 +193,29 @@ Generate a new secret:
 openssl rand -hex 32
 ```
 
-### GitHub Repository Secrets Required
+#### GitHub Repository Secrets Required
 
 - `TS_OAUTH_CLIENT_ID`: Tailscale OAuth client ID (for network access)
 - `TS_OAUTH_SECRET`: Tailscale OAuth secret
 - `EDI_GITHUB_SECRET`: Shared secret for HMAC signature verification
 
-### Behavior
+#### Behavior
 
 - Fire-and-forget: returns 200 immediately after triggering EDI
 - Creates sessions with key pattern: `github:<repo-name>:<short-sha>`
 - EDI receives a formatted message requesting it to pull and run tests
 
-## Authentication
+### Authentication
 
 EDI-Link uses HMAC-SHA256 to verify that messages originate from trusted sources.
 
-### How It Works
+#### How It Works
 
 1. Client signs each request with a shared secret
 2. Server verifies the signature before processing
 3. Timestamps prevent replay attacks (5-minute window)
 
-### Request Headers
+#### Request Headers
 
 ```
 X-EDI-Timestamp: <unix_timestamp>
@@ -207,7 +227,7 @@ Signature is computed as: `HMAC-SHA256(secret, "{timestamp}:{canonical_json_payl
 Where `canonical_json_payload` is the request body serialized with sorted keys and no whitespace:
 `{"message":"...","threadId":null,"timeoutSeconds":120}`
 
-### Setup
+#### Setup
 
 **Generate shared secret:**
 ```bash

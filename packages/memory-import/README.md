@@ -1,20 +1,22 @@
-# Memory Import (Phase 1)
+# Memory Import
 
-Small CLI for converting OpenAI or Anthropic JSON exports into dated markdown
-files for the EDI memory pipeline.
+CLI for converting OpenAI or Anthropic JSON exports into dated markdown files
+for the EDI memory pipeline. Part of the EDI Utilities monorepo.
 
 ## Usage
 
+From the repo root:
+
 ```bash
-python3 import_chats.py \
-  --input ../../example_anthropic.json \
-  --output ./out
+python3 packages/memory-import/import_chats.py \
+  --input example_anthropic.json \
+  --output packages/memory-import/out
 ```
 
 ```bash
-python3 import_chats.py \
-  --input ../../example_openai.json \
-  --output ./out
+python3 packages/memory-import/import_chats.py \
+  --input example_openai.json \
+  --output packages/memory-import/out
 ```
 
 The script auto-detects the provider format, groups messages by day, and
