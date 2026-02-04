@@ -595,6 +595,51 @@ def run_dispatch_task(
         send_dispatch_callback(callback["sessionKey"], callback_message, DEFAULT_TIMEOUT)
 
 
+def schedule_early_dispatch_check(task_id: str, delay_seconds: float) -> None:
+    """Check for quick failures without blocking request handlers."""
+    if delay_seconds <= 0:
+        return
+
+    def _check() -> None:
+        time.sleep(delay_seconds)
+
+        with TASKS_LOCK:
+            task = TASKS.get(task_id)
+            if not task or task.get("status") != "running":
+                return
+            process = task.get("_process")
+
+        if process is None:
+            with TASKS_LOCK:
+                task = TASKS.get(task_id)
+                if not task or task.get("status") != "running":
+                    return
+                task["status"] = "failed"
+                task["error"] = task.get("error") or "Dispatch failed to start"
+                task["endedAt"] = int(time.time())
+                TASKS[task_id] = task
+            return
+
+        exit_code = process.poll()
+        if exit_code is None:
+            return
+
+        status = "completed" if exit_code == 0 else "failed"
+        with TASKS_LOCK:
+            task = TASKS.get(task_id)
+            if not task or task.get("status") != "running":
+                return
+            task["status"] = status
+            task["exitCode"] = exit_code
+            task["endedAt"] = int(time.time())
+            if status == "failed" and not task.get("error"):
+                task["error"] = "Dispatch failed quickly"
+            TASKS[task_id] = task
+
+    thread = threading.Thread(target=_check, daemon=True)
+    thread.start()
+
+
 class EDIHandler(BaseHTTPRequestHandler):
     """HTTP request handler for EDI thread server."""
 
@@ -641,11 +686,12 @@ class EDIHandler(BaseHTTPRequestHandler):
                         break
                 break
 
-            chunk = self.rfile.read(chunk_size)
-            data.extend(chunk)
-            if len(data) > MAX_REQUEST_SIZE:
+            if chunk_size > MAX_REQUEST_SIZE - len(data):
                 self._send_json(413, {"ok": False, "error": "Request too large"})
                 return None
+
+            chunk = self.rfile.read(chunk_size)
+            data.extend(chunk)
 
             # Discard CRLF after the chunk.
             self.rfile.read(2)
@@ -907,10 +953,10 @@ Request: {message}"""
             if body is None:
                 return
 
-            if is_raw_body:
-                body = self._merge_dispatch_params(body, query)
             if not self._require_auth(body):
                 return
+            if is_raw_body:
+                body = self._merge_dispatch_params(body, query)
 
             agent = body.get("agent")
             message = body.get("message")
@@ -994,48 +1040,7 @@ Request: {message}"""
             with TASKS_LOCK:
                 TASKS[task_id]["_thread"] = thread
 
-            if DISPATCH_EARLY_CHECK_SECONDS > 0:
-                time.sleep(DISPATCH_EARLY_CHECK_SECONDS)
-
-                with TASKS_LOCK:
-                    task_snapshot = dict(TASKS.get(task_id, {}))
-                status = task_snapshot.get("status")
-                exit_code = task_snapshot.get("exitCode")
-                error = task_snapshot.get("error")
-                process = task_snapshot.get("_process")
-
-                if status and status != "running":
-                    response = {
-                        "ok": status in {"completed", "canceled"},
-                        "taskId": task_id,
-                        "threadId": thread_id,
-                        "status": status,
-                        "exitCode": exit_code,
-                    }
-                    if status == "failed":
-                        response["error"] = error or "Dispatch failed quickly"
-                        self._send_json(500, response)
-                    else:
-                        self._send_json(200, response)
-                    return
-
-                if process:
-                    poll_code = process.poll()
-                    if poll_code is not None:
-                        status = "completed" if poll_code == 0 else "failed"
-                        response = {
-                            "ok": status == "completed",
-                            "taskId": task_id,
-                            "threadId": thread_id,
-                            "status": status,
-                            "exitCode": poll_code,
-                        }
-                        if status == "failed":
-                            response["error"] = "Dispatch failed quickly"
-                            self._send_json(500, response)
-                        else:
-                            self._send_json(200, response)
-                        return
+            schedule_early_dispatch_check(task_id, DISPATCH_EARLY_CHECK_SECONDS)
 
             self._send_json(200, {
                 "ok": True,
