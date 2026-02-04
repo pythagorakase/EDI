@@ -98,6 +98,10 @@ Dispatch a headless coding agent (codex, claude, gemini). The server persists th
 thread history to disk (`~/.edi-link/threads/<threadId>.jsonl`) and feeds the
 conversation back into the prompt on each run.
 
+Callback defaults to `callbackSessionKey` (query), then `X-EDI-Callback-Session`
+header, then `EDI_DISPATCH_DEFAULT_CALLBACK` (falls back to
+`agent:main:discord:channel:1465948033253511320`).
+
 **Request:**
 ```json
 {
@@ -271,6 +275,7 @@ DISPATCH_DEFAULT_TIMEOUT = 3600           # Default dispatch timeout
 DISPATCH_DEFAULT_WORKDIR = ~/nexus        # Default dispatch working directory
 DISPATCH_MAX_TURNS = 25                   # Dispatch thread history window
 DISPATCH_EARLY_CHECK_SECONDS = 5          # Early failure detection delay
+DISPATCH_DEFAULT_CALLBACK = agent:main:discord:channel:1465948033253511320
 ```
 
 ## Authentication

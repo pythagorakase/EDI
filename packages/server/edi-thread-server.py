@@ -64,6 +64,10 @@ DISPATCH_DEFAULT_WORKDIR = Path(
 ).expanduser()
 DISPATCH_MAX_TURNS = int(os.environ.get("EDI_DISPATCH_MAX_TURNS", "25"))
 DISPATCH_EARLY_CHECK_SECONDS = float(os.environ.get("EDI_DISPATCH_EARLY_CHECK_SECONDS", "5"))
+DISPATCH_DEFAULT_CALLBACK = os.environ.get(
+    "EDI_DISPATCH_DEFAULT_CALLBACK",
+    "agent:main:discord:channel:1465948033253511320"
+)
 THREADS_DIR = Path.home() / ".edi-link" / "threads"
 THREAD_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -770,6 +774,7 @@ class EDIHandler(BaseHTTPRequestHandler):
             callback_session = (
                 self._first_query_value(query, "callbackSessionKey")
                 or self.headers.get("X-EDI-Callback-Session")
+                or DISPATCH_DEFAULT_CALLBACK
             )
             if callback_session:
                 payload["callback"] = {"sessionKey": callback_session}

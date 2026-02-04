@@ -115,6 +115,7 @@ curl http://127.0.0.1:19001/thread/<thread-id>
 - `DISPATCH_DEFAULT_WORKDIR = ~/nexus` (env: `EDI_DISPATCH_WORKDIR`)
 - `DISPATCH_MAX_TURNS = 25` (env: `EDI_DISPATCH_MAX_TURNS`)
 - `DISPATCH_EARLY_CHECK_SECONDS = 5` seconds (env: `EDI_DISPATCH_EARLY_CHECK_SECONDS`)
+- `DISPATCH_DEFAULT_CALLBACK = agent:main:discord:channel:1465948033253511320` (env: `EDI_DISPATCH_DEFAULT_CALLBACK`)
 - Thread logs stored at `~/.edi-link/threads/<threadId>.jsonl`
 
 **Client** (`edi`):
