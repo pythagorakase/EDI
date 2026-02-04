@@ -16,6 +16,7 @@ Endpoints:
 
   POST /dispatch
     Body: {"agent": "codex|claude|gemini", "message": "...", "threadId": "<id>", "timeout": 3600}
+      or raw text/markdown with query params (?agent=codex&threadId=<id>&timeout=3600)
     Returns: {"ok": true, "taskId": "...", "threadId": "...", "status": "running"}
 
   GET /tasks
@@ -45,7 +46,7 @@ import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 # Configuration
 CLAWDBOT_URL = "http://127.0.0.1:18789"
@@ -62,6 +63,7 @@ DISPATCH_DEFAULT_WORKDIR = Path(
     os.environ.get("EDI_DISPATCH_WORKDIR", str(Path.home() / "nexus"))
 ).expanduser()
 DISPATCH_MAX_TURNS = int(os.environ.get("EDI_DISPATCH_MAX_TURNS", "25"))
+DISPATCH_EARLY_CHECK_SECONDS = float(os.environ.get("EDI_DISPATCH_EARLY_CHECK_SECONDS", "5"))
 THREADS_DIR = Path.home() / ".edi-link" / "threads"
 THREAD_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -593,11 +595,60 @@ def run_dispatch_task(
         send_dispatch_callback(callback["sessionKey"], callback_message, DEFAULT_TIMEOUT)
 
 
+def schedule_early_dispatch_check(task_id: str, delay_seconds: float) -> None:
+    """Check for quick failures without blocking request handlers."""
+    if delay_seconds <= 0:
+        return
+
+    def _check() -> None:
+        time.sleep(delay_seconds)
+
+        with TASKS_LOCK:
+            task = TASKS.get(task_id)
+            if not task or task.get("status") != "running":
+                return
+            process = task.get("_process")
+
+        if process is None:
+            with TASKS_LOCK:
+                task = TASKS.get(task_id)
+                if not task or task.get("status") != "running":
+                    return
+                task["status"] = "failed"
+                task["error"] = task.get("error") or "Dispatch failed to start"
+                task["endedAt"] = int(time.time())
+                TASKS[task_id] = task
+            return
+
+        exit_code = process.poll()
+        if exit_code is None:
+            return
+
+        status = "completed" if exit_code == 0 else "failed"
+        with TASKS_LOCK:
+            task = TASKS.get(task_id)
+            if not task or task.get("status") != "running":
+                return
+            task["status"] = status
+            task["exitCode"] = exit_code
+            task["endedAt"] = int(time.time())
+            if status == "failed" and not task.get("error"):
+                task["error"] = "Dispatch failed quickly"
+            TASKS[task_id] = task
+
+    thread = threading.Thread(target=_check, daemon=True)
+    thread.start()
+
+
 class EDIHandler(BaseHTTPRequestHandler):
     """HTTP request handler for EDI thread server."""
 
-    def _read_json_body(self) -> Optional[Dict[str, Any]]:
-        """Read and parse JSON body (returns None on error after sending response)."""
+    def _read_raw_body(self) -> Optional[bytes]:
+        """Read raw request body (returns None on error after sending response)."""
+        transfer_encoding = (self.headers.get("Transfer-Encoding") or "").lower()
+        if "chunked" in transfer_encoding:
+            return self._read_chunked_body()
+
         try:
             length = int(self.headers.get('Content-Length', 0))
         except ValueError:
@@ -608,7 +659,50 @@ class EDIHandler(BaseHTTPRequestHandler):
             self._send_json(413, {"ok": False, "error": "Request too large"})
             return None
 
-        raw = self.rfile.read(length) if length else b""
+        return self.rfile.read(length) if length else b""
+
+    def _read_chunked_body(self) -> Optional[bytes]:
+        """Read and decode chunked transfer-encoding body."""
+        data = bytearray()
+        while True:
+            line = self.rfile.readline()
+            if not line:
+                self._send_json(400, {"ok": False, "error": "Invalid chunked encoding"})
+                return None
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                chunk_size = int(line.split(b";", 1)[0], 16)
+            except ValueError:
+                self._send_json(400, {"ok": False, "error": "Invalid chunk size"})
+                return None
+
+            if chunk_size == 0:
+                # Consume trailer headers (if any) until blank line.
+                while True:
+                    trailer = self.rfile.readline()
+                    if not trailer or trailer in (b"\r\n", b"\n"):
+                        break
+                break
+
+            if chunk_size > MAX_REQUEST_SIZE - len(data):
+                self._send_json(413, {"ok": False, "error": "Request too large"})
+                return None
+
+            chunk = self.rfile.read(chunk_size)
+            data.extend(chunk)
+
+            # Discard CRLF after the chunk.
+            self.rfile.read(2)
+
+        return bytes(data)
+
+    def _read_json_body(self) -> Optional[Dict[str, Any]]:
+        """Read and parse JSON body (returns None on error after sending response)."""
+        raw = self._read_raw_body()
+        if raw is None:
+            return None
         if not raw:
             return {}
 
@@ -617,6 +711,70 @@ class EDIHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._send_json(400, {"ok": False, "error": "Invalid JSON"})
             return None
+
+    def _read_dispatch_body(self) -> Tuple[Optional[Dict[str, Any]], bool]:
+        """Read dispatch payload, supporting JSON and raw text/markdown."""
+        content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if content_type in {"text/plain", "text/markdown", "text/x-markdown"}:
+            raw = self._read_raw_body()
+            if raw is None:
+                return None, False
+            return {"message": raw.decode("utf-8", errors="replace")}, True
+
+        return self._read_json_body(), False
+
+    def _first_query_value(self, query: Dict[str, List[str]], key: str) -> Optional[str]:
+        values = query.get(key)
+        if not values:
+            return None
+        value = values[-1]
+        return value if value != "" else None
+
+    def _merge_dispatch_params(self, payload: Dict[str, Any], query: Dict[str, List[str]]) -> Dict[str, Any]:
+        """Merge query/header params into payload when missing."""
+        if not payload.get("agent"):
+            agent_value = (
+                self._first_query_value(query, "agent")
+                or self.headers.get("X-EDI-Agent")
+            )
+            if agent_value:
+                payload["agent"] = agent_value
+
+        if payload.get("threadId") in (None, ""):
+            thread_value = (
+                self._first_query_value(query, "threadId")
+                or self._first_query_value(query, "thread")
+                or self.headers.get("X-EDI-Thread")
+            )
+            if thread_value:
+                payload["threadId"] = thread_value
+
+        if "timeout" not in payload and "timeoutSeconds" not in payload:
+            timeout_value = (
+                self._first_query_value(query, "timeout")
+                or self._first_query_value(query, "timeoutSeconds")
+                or self.headers.get("X-EDI-Timeout")
+            )
+            if timeout_value is not None:
+                payload["timeout"] = timeout_value
+
+        if "workdir" not in payload:
+            workdir_value = (
+                self._first_query_value(query, "workdir")
+                or self.headers.get("X-EDI-Workdir")
+            )
+            if workdir_value:
+                payload["workdir"] = workdir_value
+
+        if "callback" not in payload:
+            callback_session = (
+                self._first_query_value(query, "callbackSessionKey")
+                or self.headers.get("X-EDI-Callback-Session")
+            )
+            if callback_session:
+                payload["callback"] = {"sessionKey": callback_session}
+
+        return payload
 
     def _require_auth(self, payload: Dict[str, Any]) -> bool:
         """Enforce HMAC authentication if configured."""
@@ -790,12 +948,15 @@ Request: {message}"""
             return
 
         if parsed.path == "/dispatch":
-            body = self._read_json_body()
+            query = parse_qs(parsed.query)
+            body, is_raw_body = self._read_dispatch_body()
             if body is None:
                 return
 
             if not self._require_auth(body):
                 return
+            if is_raw_body:
+                body = self._merge_dispatch_params(body, query)
 
             agent = body.get("agent")
             message = body.get("message")
@@ -878,6 +1039,8 @@ Request: {message}"""
 
             with TASKS_LOCK:
                 TASKS[task_id]["_thread"] = thread
+
+            schedule_early_dispatch_check(task_id, DISPATCH_EARLY_CHECK_SECONDS)
 
             self._send_json(200, {
                 "ok": True,

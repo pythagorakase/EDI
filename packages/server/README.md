@@ -111,6 +111,15 @@ conversation back into the prompt on each run.
 }
 ```
 
+**Piped text or markdown prompt:**
+```bash
+cat prompt.md | curl -X POST "http://127.0.0.1:19001/dispatch?agent=codex&workdir=/home/edi/nexus" \
+  -H "Content-Type: text/markdown" \
+  --data-binary @-
+```
+
+**Helper script:** `scripts/dispatch-task.sh` runs multiline dispatch commands safely and writes `.out` and `.exit` files with early-failure detection.
+
 **Response:**
 ```json
 {
@@ -245,6 +254,7 @@ POLL_INTERVAL = 1.0                         # Polling interval (seconds)
 DISPATCH_DEFAULT_TIMEOUT = 3600             # Default dispatch timeout
 DISPATCH_DEFAULT_WORKDIR = ~/nexus          # Default dispatch working directory
 DISPATCH_MAX_TURNS = 25                     # Dispatch thread history window
+DISPATCH_EARLY_CHECK_SECONDS = 5            # Early failure detection delay
 ```
 
 ## Network Access

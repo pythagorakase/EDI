@@ -64,6 +64,11 @@ curl -X POST http://127.0.0.1:19001/dispatch \
   -H "Content-Type: application/json" \
   -d '{"agent":"codex","message":"Run tests and summarize failures","threadId":null}'
 
+# Dispatch using a piped text/markdown prompt
+cat prompt.md | curl -X POST "http://127.0.0.1:19001/dispatch?agent=codex" \
+  -H "Content-Type: text/markdown" \
+  --data-binary @-
+
 # List running/canceling tasks
 curl http://127.0.0.1:19001/tasks
 
@@ -89,6 +94,7 @@ curl http://127.0.0.1:19001/thread/<thread-id>
 - `DISPATCH_DEFAULT_TIMEOUT = 3600` seconds (env: `EDI_DISPATCH_DEFAULT_TIMEOUT`)
 - `DISPATCH_DEFAULT_WORKDIR = ~/nexus` (env: `EDI_DISPATCH_WORKDIR`)
 - `DISPATCH_MAX_TURNS = 25` (env: `EDI_DISPATCH_MAX_TURNS`)
+- `DISPATCH_EARLY_CHECK_SECONDS = 5` seconds (env: `EDI_DISPATCH_EARLY_CHECK_SECONDS`)
 - Thread logs stored at `~/.edi-link/threads/<threadId>.jsonl`
 
 **Client** (`edi`):
