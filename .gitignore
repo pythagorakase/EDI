@@ -12,3 +12,6 @@ venv/
 .idea/
 .vscode/
 *.swp
+
+# macOS metadata
+._*

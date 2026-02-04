@@ -104,6 +104,13 @@ POST /dispatch
 }
 ```
 
+Piped text or markdown prompt:
+```bash
+cat prompt.md | curl -X POST "http://127.0.0.1:19001/dispatch?agent=codex" \
+  -H "Content-Type: text/markdown" \
+  --data-binary @-
+```
+
 ## Contributors
 
 - **pythagorakase** - Client development
