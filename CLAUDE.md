@@ -187,6 +187,12 @@ export EDI_GITHUB_SECRET="<hex-secret>"
 # Option 2: File
 echo "<hex-secret>" > /etc/edi/github-secret
 chmod 600 /etc/edi/github-secret
+chown edi:edi /etc/edi/github-secret  # ensure EDI server can read
+
+# Option 3: User-level file (useful when running as non-root)
+mkdir -p ~/.config/edi
+echo "<hex-secret>" > ~/.config/edi/github-secret
+chmod 600 ~/.config/edi/github-secret
 ```
 
 Generate a new secret:
