@@ -17,14 +17,25 @@ start() {
     # Load environment (includes EDI_AUTH_SECRET)
     if [ -f "$ENV_FILE" ]; then
         echo "Loading environment from $ENV_FILE"
+        set -a
         source "$ENV_FILE"
+        set +a
+    fi
+
+    if [ -z "$EDI_GITHUB_SECRET" ]; then
+        if [ -r "$HOME/.config/edi/github-secret" ]; then
+            EDI_GITHUB_SECRET="$(cat "$HOME/.config/edi/github-secret")"
+        elif [ -r "/etc/edi/github-secret" ]; then
+            EDI_GITHUB_SECRET="$(cat "/etc/edi/github-secret")"
+        fi
     fi
 
     # Ensure coding agent CLIs are in PATH
     export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
 
     echo "Starting EDI Thread Server..."
-    nohup env EDI_AUTH_SECRET="${EDI_AUTH_SECRET:-}" python3 "$SERVER_SCRIPT" > "$LOG_FILE" 2>&1 &
+    nohup env EDI_AUTH_SECRET="${EDI_AUTH_SECRET:-}" EDI_GITHUB_SECRET="${EDI_GITHUB_SECRET:-}" \
+        python3 "$SERVER_SCRIPT" > "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
     sleep 2
     

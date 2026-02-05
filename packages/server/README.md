@@ -283,7 +283,14 @@ DISPATCH_DEFAULT_CALLBACK = agent:main:discord:channel:1465948033253511320
 - Optional HMAC auth for `/ask` and `/dispatch`
 - Server secret from `EDI_AUTH_SECRET` or `/etc/edi/secret`
 - Client sends `X-EDI-Timestamp` and `X-EDI-Signature`
-- GitHub webhook secret from `EDI_GITHUB_SECRET` or `/etc/edi/github-secret`
+- GitHub webhook secret from `EDI_GITHUB_SECRET`, `/etc/edi/github-secret`, or `~/.config/edi/github-secret`
+  (file must be readable by the server user)
+
+## GitHub Webhook
+
+- Endpoint: `POST /github-webhook`
+- Payload: `{"repository":"owner/repo","ref":"refs/heads/main","sha":"...","message":"..."}`
+- Signature: `X-Hub-Signature-256: sha256=<hmac>`
 
 ## Network Access
 

@@ -14,6 +14,7 @@ agent) beyond the core OpenClaw framework. Each utility lives under
 |---------|------|---------|
 | **EDI-Link** | `packages/client/`, `packages/server/` | Communication system (CLI + thread server) |
 | **Memory Import** | `packages/memory-import/` | Chat export ingestion pipeline |
+| **GitHub Webhook** | `packages/hooks/github-webhook/` | OpenClaw webhook transform for merge notifications |
 
 ## Structure
 

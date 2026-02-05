@@ -85,6 +85,7 @@ MAX_REQUEST_SIZE = 1024 * 1024  # 1MB
 # GitHub Webhook Authentication (separate secret for defense in depth)
 GITHUB_WEBHOOK_SECRET_ENV = "EDI_GITHUB_SECRET"
 GITHUB_WEBHOOK_SECRET_FILE = Path("/etc/edi/github-secret")
+GITHUB_WEBHOOK_SECRET_USER_FILE = Path.home() / ".config" / "edi" / "github-secret"
 
 
 def load_auth_secret() -> Optional[bytes]:
@@ -112,21 +113,30 @@ def load_auth_secret() -> Optional[bytes]:
 def load_github_secret() -> Optional[bytes]:
     """Load GitHub webhook secret for signature verification.
 
-    Priority: environment variable > file > None (webhook auth disabled)
+    Priority: environment variable > /etc/edi/github-secret > ~/.config/edi/github-secret
+    > None (webhook auth disabled)
     """
     # Try environment variable first
     secret = os.environ.get(GITHUB_WEBHOOK_SECRET_ENV)
     if secret:
         return secret.strip().encode()
 
-    # Try file fallback
-    if GITHUB_WEBHOOK_SECRET_FILE.exists():
+    def _read_secret_file(path: Path) -> Optional[bytes]:
         try:
-            secret = GITHUB_WEBHOOK_SECRET_FILE.read_text().strip()
-            if secret:
-                return secret.encode()
+            secret = path.read_text().strip()
+        except FileNotFoundError:
+            return None
+        except PermissionError:
+            return None
         except Exception:
-            pass
+            return None
+        return secret.encode() if secret else None
+
+    # Try file fallback(s)
+    for path in (GITHUB_WEBHOOK_SECRET_FILE, GITHUB_WEBHOOK_SECRET_USER_FILE):
+        secret_bytes = _read_secret_file(path)
+        if secret_bytes:
+            return secret_bytes
 
     return None
 
@@ -1241,7 +1251,10 @@ def main():
         print("GitHub Webhook: ENABLED (signature verification)")
     else:
         print("GitHub Webhook: DISABLED (no secret configured)")
-        print(f"  Set {GITHUB_WEBHOOK_SECRET_ENV} env var or create {GITHUB_WEBHOOK_SECRET_FILE}")
+        print(
+            f"  Set {GITHUB_WEBHOOK_SECRET_ENV} env var or create "
+            f"{GITHUB_WEBHOOK_SECRET_FILE} or {GITHUB_WEBHOOK_SECRET_USER_FILE}"
+        )
 
     print("=" * 60)
     print()
